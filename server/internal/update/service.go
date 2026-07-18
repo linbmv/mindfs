@@ -16,6 +16,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -44,15 +45,17 @@ type Status struct {
 	PublishedAt         time.Time `json:"published_at,omitempty"`
 	LastCheckedAt       time.Time `json:"last_checked_at,omitempty"`
 	AutoUpdateSupported bool      `json:"auto_update_supported"`
+	SafeUpdateSupported bool      `json:"safe_update_supported"`
 }
 
 type Service struct {
-	repo          string
-	current       string
-	executable    string
-	args          []string
-	checkInterval time.Duration
-	client        *http.Client
+	repo             string
+	current          string
+	executable       string
+	args             []string
+	checkInterval    time.Duration
+	client           *http.Client
+	safeUpdateScript string
 
 	mu        sync.RWMutex
 	status    Status
@@ -113,13 +116,15 @@ func NewService(repo, currentVersion, executable string, args []string, interval
 		client: &http.Client{
 			Timeout: 10 * time.Minute,
 		},
+		safeUpdateScript: strings.TrimSpace(os.Getenv("MINDFS_SAFE_UPDATE_SCRIPT")),
 	}
 	st := Status{
 		CurrentVersion:      currentVersion,
 		Status:              "idle",
 		AutoUpdateSupported: s.canAutoUpdate(),
+		SafeUpdateSupported: s.canSafeUpdate(),
 	}
-	if !st.AutoUpdateSupported {
+	if !st.AutoUpdateSupported && !st.SafeUpdateSupported {
 		st.Message = s.unsupportedMessage()
 	}
 	s.status = st
@@ -181,7 +186,7 @@ func (s *Service) CheckNow(ctx context.Context) {
 				return
 			}
 			st.Status = "idle"
-			if !st.AutoUpdateSupported {
+			if !st.AutoUpdateSupported && !st.SafeUpdateSupported {
 				st.Message = s.unsupportedMessage()
 			}
 		})
@@ -201,7 +206,8 @@ func (s *Service) CheckNow(ctx context.Context) {
 		st.LastCheckedAt = time.Now().UTC()
 		st.HasUpdate = hasUpdate
 		st.AutoUpdateSupported = s.canAutoUpdate()
-		if !st.AutoUpdateSupported {
+		st.SafeUpdateSupported = s.canSafeUpdate()
+		if !st.AutoUpdateSupported && !st.SafeUpdateSupported {
 			st.Message = s.unsupportedMessage()
 		} else if hasUpdate && (st.Status == "" || st.Status == "idle" || st.Status == "available") {
 			st.Message = ""
@@ -214,10 +220,35 @@ func (s *Service) CheckNow(ctx context.Context) {
 			return
 		}
 		st.Status = "idle"
-		if st.AutoUpdateSupported {
+		if st.AutoUpdateSupported || st.SafeUpdateSupported {
 			st.Message = ""
 		}
 	})
+}
+
+// TriggerSafeUpdate runs the fixed, locally configured update script. Unlike
+// TriggerUpdate, it never downloads or installs an official release package.
+func (s *Service) TriggerSafeUpdate(ctx context.Context) error {
+	if s == nil {
+		return errors.New("update service not configured")
+	}
+	if _, err := s.safeUpdateScriptPath(); err != nil {
+		return err
+	}
+	st := s.GetStatus()
+	if !st.HasUpdate || strings.TrimSpace(st.LatestVersion) == "" {
+		return errors.New("no update available")
+	}
+	if st.Status == "downloading" || st.Status == "installing" || st.Status == "restarting" {
+		return errors.New("update already in progress")
+	}
+
+	s.updateStatus(func(st *Status) {
+		st.Status = "installing"
+		st.Message = "Running safe source update, tests, and build..."
+	})
+	go s.runSafeUpdate(context.WithoutCancel(ctx))
+	return nil
 }
 
 func (s *Service) TriggerUpdate(ctx context.Context) error {
@@ -241,6 +272,31 @@ func (s *Service) TriggerUpdate(ctx context.Context) error {
 	})
 
 	go s.runUpdate(context.WithoutCancel(ctx), st.LatestVersion)
+	return nil
+}
+
+// RestartCurrent starts a replacement process with the current executable,
+// arguments, and environment. The old process exits after the replacement is
+// scheduled, matching the restart phase of the Web auto-update flow.
+func (s *Service) RestartCurrent() error {
+	if s == nil {
+		return errors.New("update service not configured")
+	}
+	if runtime.GOOS == "windows" {
+		return errors.New("service restart is not supported on windows")
+	}
+	status := s.GetStatus().Status
+	if status == "downloading" || status == "installing" || status == "restarting" {
+		return errors.New("update or restart already in progress")
+	}
+	s.updateStatus(func(st *Status) {
+		st.Status = "restarting"
+		st.Message = "Restarting service..."
+	})
+	if err := s.restartInstalledBinary(""); err != nil {
+		s.fail(err)
+		return err
+	}
 	return nil
 }
 
@@ -270,6 +326,7 @@ func (s *Service) InstallLatest(ctx context.Context) (Status, error) {
 		st.LastCheckedAt = time.Now().UTC()
 		st.HasUpdate = hasUpdate
 		st.AutoUpdateSupported = s.canAutoUpdate()
+		st.SafeUpdateSupported = s.canSafeUpdate()
 		if !st.AutoUpdateSupported {
 			st.Status = "idle"
 			st.Message = s.unsupportedMessage()
@@ -313,6 +370,44 @@ func (s *Service) runUpdate(ctx context.Context, version string) {
 	if err := s.installUpdate(ctx, version, true); err != nil {
 		s.fail(err)
 	}
+}
+
+func (s *Service) runSafeUpdate(ctx context.Context) {
+	if err := s.executeSafeUpdateScript(ctx); err != nil {
+		s.fail(err)
+		return
+	}
+	s.updateStatus(func(st *Status) {
+		st.Status = "restarting"
+		st.Message = "Safe update installed. Restarting service..."
+	})
+	if err := s.restartInstalledBinary(""); err != nil {
+		s.fail(err)
+	}
+}
+
+func (s *Service) executeSafeUpdateScript(ctx context.Context) error {
+	script, err := s.safeUpdateScriptPath()
+	if err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, script)
+	cmd.Env = append(os.Environ(),
+		"MINDFS_SAFE_UPDATE_EXECUTABLE="+s.executable,
+		"MINDFS_SAFE_UPDATE_VERSION="+strings.TrimSpace(s.GetStatus().LatestVersion),
+	)
+	output, err := cmd.CombinedOutput()
+	trimmed := strings.TrimSpace(string(output))
+	if trimmed != "" {
+		log.Printf("[update] safe_script.output script=%s output=%s", script, trimmed)
+	}
+	if err != nil {
+		if trimmed != "" {
+			return fmt.Errorf("safe update failed: %w: %s", err, lastLines(trimmed, 8))
+		}
+		return fmt.Errorf("safe update failed: %w", err)
+	}
+	return nil
 }
 
 func (s *Service) installUpdate(ctx context.Context, version string, restart bool) error {
@@ -786,6 +881,32 @@ func (s *Service) canAutoUpdate() bool {
 	return err == nil
 }
 
+func (s *Service) canSafeUpdate() bool {
+	_, err := s.safeUpdateScriptPath()
+	return err == nil
+}
+
+func (s *Service) safeUpdateScriptPath() (string, error) {
+	if s == nil {
+		return "", errors.New("update service not configured")
+	}
+	path := strings.TrimSpace(s.safeUpdateScript)
+	if path == "" {
+		return "", errors.New("safe update is not configured")
+	}
+	if !filepath.IsAbs(path) {
+		return "", errors.New("safe update script path must be absolute")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("safe update script unavailable: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		return "", errors.New("safe update script must be an executable regular file")
+	}
+	return filepath.Clean(path), nil
+}
+
 func (s *Service) unsupportedMessage() string {
 	if _, err := updatePublicKey(); err != nil {
 		return "Auto update is unavailable because the release verification public key is not configured."
@@ -795,6 +916,14 @@ func (s *Service) unsupportedMessage() string {
 		return "Auto update is only available for mindfs release binaries."
 	}
 	return "Auto update is unavailable for the current install path."
+}
+
+func lastLines(value string, count int) string {
+	lines := strings.Split(strings.TrimSpace(value), "\n")
+	if count > 0 && len(lines) > count {
+		lines = lines[len(lines)-count:]
+	}
+	return strings.Join(lines, " | ")
 }
 
 func (s *Service) installLayout() (installLayout, error) {

@@ -44,6 +44,12 @@ import {
   webPushReasonLabel,
   type WebPushStatus,
 } from "../services/webPush";
+import {
+  fetchMindFSServiceStatus,
+  restartMindFSService,
+  waitForMindFSService,
+  type MindFSServiceStatus,
+} from "../services/serviceControl";
 
 type BeforeInstallPromptEvent = Event & {
   prompt: () => Promise<void>;
@@ -1339,6 +1345,9 @@ export function FileTree({
   const [agentLifecycleBusy, setAgentLifecycleBusy] = React.useState(false);
   const [agentLifecycleRunningAgent, setAgentLifecycleRunningAgent] = React.useState("");
   const [agentLifecycleError, setAgentLifecycleError] = React.useState("");
+  const [mindfsServiceStatus, setMindFSServiceStatus] = React.useState<MindFSServiceStatus | null>(null);
+  const [mindfsServiceAction, setMindFSServiceAction] = React.useState<"status" | "restart" | null>(null);
+  const [mindfsServiceError, setMindFSServiceError] = React.useState("");
   const [dismissedRelayTipIds, setDismissedRelayTipIds] = React.useState<string[]>(() => {
     if (typeof window === "undefined") {
       return [];
@@ -1593,16 +1602,16 @@ export function FileTree({
     : null;
   const shouldShowRelayTip = Boolean(relayTip);
   const shouldShowNextRelayTip = visibleRelayTips.length > 1;
-  const hasFooterContent =
-    !!updateActionLabel ||
-    !!updateActionHelp ||
-    !!footerTopContent ||
-    !!relayActionLabel ||
-    !!relayActionHelp ||
-    shouldShowRelayTip ||
-    (isNativeApp && !!onGoHome) ||
-    shouldShowInstallButton ||
-    shouldShowInstallHelp;
+  // Keep this surface dedicated to MindFS service updates.
+  const showFooterExtras = false;
+  const mindfsServiceRestarting =
+    mindfsServiceAction === "restart" || mindfsServiceStatus?.status === "restarting";
+  const mindfsServiceLabel = mindfsServiceRestarting
+    ? t("fileTree.serviceRestarting")
+    : mindfsServiceStatus?.status === "running"
+      ? t("fileTree.serviceRunning")
+      : t("fileTree.serviceStatus");
+  const hasFooterContent = true;
 
   const dismissRelayTip = React.useCallback(() => {
     if (!relayTip?.id) {
@@ -1798,6 +1807,42 @@ export function FileTree({
       })
       .finally(() => setAgentConfigBusy(false));
   }, [t]);
+
+  const refreshMindFSServiceStatus = React.useCallback(async () => {
+    if (mindfsServiceAction) {
+      return;
+    }
+    setMindFSServiceAction("status");
+    setMindFSServiceError("");
+    try {
+      setMindFSServiceStatus(await fetchMindFSServiceStatus());
+    } catch (error) {
+      setMindFSServiceError(error instanceof Error ? error.message : t("fileTree.serviceStatusFailed"));
+    } finally {
+      setMindFSServiceAction(null);
+    }
+  }, [mindfsServiceAction, t]);
+
+  const restartMindFS = React.useCallback(async () => {
+    if (mindfsServiceAction || !window.confirm(t("fileTree.restartServiceConfirm"))) {
+      return;
+    }
+    setMindFSServiceAction("restart");
+    setMindFSServiceError("");
+    setMindFSServiceStatus({ status: "restarting" });
+    try {
+      await restartMindFSService();
+      if (await waitForMindFSService()) {
+        window.location.reload();
+        return;
+      }
+      setMindFSServiceError(t("fileTree.serviceRestartTimeout"));
+    } catch (error) {
+      setMindFSServiceError(error instanceof Error ? error.message : t("fileTree.serviceRestartFailed"));
+    } finally {
+      setMindFSServiceAction(null);
+    }
+  }, [mindfsServiceAction, t]);
 
   React.useEffect(() => {
     if (!agentConfigSwitchRequest) {
@@ -2555,22 +2600,6 @@ export function FileTree({
                 </button>
                 <button
                   type="button"
-                  onClick={() => openAgentConfigFlow("backup")}
-                  style={fileTreeMenuButtonStyle}
-                >
-                  <ConfigArchiveIcon />
-                  <span>{t("fileTree.addAgentConfig")}</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => openAgentConfigFlow("switch")}
-                  style={fileTreeMenuButtonStyle}
-                >
-                  <ConfigSwitchIcon />
-                  <span>{t("fileTree.switchAgentConfig")}</span>
-                </button>
-                <button
-                  type="button"
                   onClick={openAgentLifecycleFlow}
                   style={fileTreeMenuButtonStyle}
                 >
@@ -3083,7 +3112,7 @@ export function FileTree({
       >
         {updateActionLabel ? (
           <div ref={updateNotesRef} style={{ position: "relative" }}>
-            {isUpdateNotesOpen && updateActionSummary ? (
+            {showFooterExtras && isUpdateNotesOpen && updateActionSummary ? (
               <div
                 style={{
                   position: "absolute",
@@ -3155,7 +3184,7 @@ export function FileTree({
                 ) : null}
                 <span>{updateActionLabel}</span>
               </button>
-              {updateActionSummary ? (
+              {showFooterExtras && updateActionSummary ? (
                 <button
                   type="button"
                   aria-label={isUpdateNotesOpen ? t("fileTree.hideUpdateNotes") : t("fileTree.showUpdateNotes")}
@@ -3194,12 +3223,155 @@ export function FileTree({
             </div>
           </div>
         ) : null}
-        {updateActionHelp && !updateActionLabel ? (
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) 38px", gap: "6px" }}>
+          <button
+            type="button"
+            onClick={() => { void refreshMindFSServiceStatus(); }}
+            disabled={mindfsServiceAction !== null}
+            title={t("fileTree.refreshServiceStatus")}
+            style={{
+              minWidth: 0,
+              minHeight: "36px",
+              border: "1px solid var(--border-color)",
+              background: "var(--panel-bg)",
+              color: "var(--text-primary)",
+              borderRadius: "8px",
+              padding: "8px 10px",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: "7px",
+              cursor: mindfsServiceAction !== null ? "wait" : "pointer",
+              fontSize: "11px",
+              fontWeight: 700,
+            }}
+          >
+            <span
+              aria-hidden="true"
+              style={{
+                width: "7px",
+                height: "7px",
+                borderRadius: "50%",
+                background: mindfsServiceRestarting
+                  ? "var(--accent-color)"
+                  : mindfsServiceStatus?.status === "running"
+                    ? "#22c55e"
+                    : "var(--text-secondary)",
+                flexShrink: 0,
+              }}
+            />
+            <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {mindfsServiceLabel}
+            </span>
+            {mindfsServiceStatus?.version ? (
+              <span style={{ color: "var(--text-secondary)", fontWeight: 500, flexShrink: 0 }}>
+                {mindfsServiceStatus.version}
+              </span>
+            ) : null}
+          </button>
+          <button
+            type="button"
+            onClick={() => { void restartMindFS(); }}
+            disabled={mindfsServiceAction !== null}
+            aria-label={t("fileTree.restartService")}
+            title={t("fileTree.restartService")}
+            style={{
+              minHeight: "36px",
+              border: "1px solid var(--border-color)",
+              background: "var(--panel-bg)",
+              color: "var(--text-primary)",
+              borderRadius: "8px",
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              cursor: mindfsServiceAction !== null ? "wait" : "pointer",
+            }}
+          >
+            {mindfsServiceRestarting ? (
+              <span
+                aria-hidden="true"
+                style={{
+                  width: "13px",
+                  height: "13px",
+                  borderRadius: "50%",
+                  border: "2px solid currentColor",
+                  borderRightColor: "transparent",
+                  animation: "mindfs-update-spin 0.9s linear infinite",
+                }}
+              />
+            ) : (
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M20 11a8.1 8.1 0 0 0-14.7-4.7L4 8" />
+                <path d="M4 4v4h4" />
+                <path d="M4 13a8.1 8.1 0 0 0 14.7 4.7L20 16" />
+                <path d="M20 20v-4h-4" />
+              </svg>
+            )}
+          </button>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: "6px" }}>
+          <button
+            type="button"
+            onClick={() => openAgentConfigFlow("backup")}
+            style={{
+              minWidth: 0,
+              minHeight: "36px",
+              border: "1px solid var(--border-color)",
+              background: "var(--panel-bg)",
+              color: "var(--text-primary)",
+              borderRadius: "8px",
+              padding: "8px 6px",
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: "6px",
+              cursor: "pointer",
+              fontSize: "11px",
+              fontWeight: 600,
+            }}
+          >
+            <ConfigArchiveIcon />
+            <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {t("fileTree.addAgentConfig")}
+            </span>
+          </button>
+          <button
+            type="button"
+            onClick={() => openAgentConfigFlow("switch")}
+            style={{
+              minWidth: 0,
+              minHeight: "36px",
+              border: "1px solid var(--border-color)",
+              background: "var(--panel-bg)",
+              color: "var(--text-primary)",
+              borderRadius: "8px",
+              padding: "8px 6px",
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: "6px",
+              cursor: "pointer",
+              fontSize: "11px",
+              fontWeight: 600,
+            }}
+          >
+            <ConfigSwitchIcon />
+            <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {t("fileTree.switchAgentConfig")}
+            </span>
+          </button>
+        </div>
+        {mindfsServiceError ? (
+          <div style={{ color: "var(--danger-color, #dc2626)", fontSize: "11px", lineHeight: 1.4, textAlign: "center" }}>
+            {mindfsServiceError}
+          </div>
+        ) : null}
+        {showFooterExtras && updateActionHelp && !updateActionLabel ? (
           <div style={{ fontSize: "11px", color: "var(--text-secondary)", lineHeight: 1.5, textAlign: "center" }}>
             {updateActionHelp}
           </div>
         ) : null}
-        {shouldShowRelayTip && relayTip ? (
+        {showFooterExtras && shouldShowRelayTip && relayTip ? (
           <div
             style={{
               position: "relative",
@@ -3338,10 +3510,10 @@ export function FileTree({
             ) : null}
           </div>
         ) : null}
-        {footerTopContent ? (
+        {showFooterExtras && footerTopContent ? (
           <div style={{ width: "100%" }}>{footerTopContent}</div>
         ) : null}
-        {shouldShowInstallButton ? (
+        {showFooterExtras && shouldShowInstallButton ? (
           relayActionLabel ? (
             <button
               type="button"
@@ -3366,7 +3538,7 @@ export function FileTree({
               <span>{relayActionLabel}</span>
             </button>
           ) : null
-        ) : relayActionLabel ? (
+        ) : showFooterExtras && relayActionLabel ? (
           <button
             type="button"
             disabled={relayActionDisabled}
@@ -3390,12 +3562,12 @@ export function FileTree({
             <span>{relayActionLabel}</span>
           </button>
         ) : null}
-        {relayActionHelp ? (
+        {showFooterExtras && relayActionHelp ? (
           <div style={{ fontSize: "11px", color: "var(--text-secondary)", lineHeight: 1.5, textAlign: "center" }}>
             {relayActionHelp}
           </div>
         ) : null}
-        {isNativeApp && onGoHome ? (
+        {showFooterExtras && isNativeApp && onGoHome ? (
           <button
             type="button"
             onClick={() => onGoHome()}
@@ -3418,7 +3590,7 @@ export function FileTree({
             <span>{t("fileTree.goHome")}</span>
           </button>
         ) : null}
-        {shouldShowInstallButton ? (
+        {showFooterExtras && shouldShowInstallButton ? (
           <button
             type="button"
             onClick={() => { void handleInstall(); }}
@@ -3448,7 +3620,7 @@ export function FileTree({
             <span>{installLabel}</span>
           </button>
         ) : null}
-        {shouldShowInstallHelp ? (
+        {showFooterExtras && shouldShowInstallHelp ? (
           <div style={{ fontSize: "11px", color: "var(--text-secondary)", lineHeight: 1.5, textAlign: "center" }}>
             {installHelp}
           </div>

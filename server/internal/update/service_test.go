@@ -86,6 +86,80 @@ func TestIsNewerVersion(t *testing.T) {
 	}
 }
 
+func TestSafeUpdateScriptPathRequiresAbsoluteExecutableFile(t *testing.T) {
+	t.Parallel()
+
+	service := &Service{safeUpdateScript: "relative-script.sh"}
+	if _, err := service.safeUpdateScriptPath(); err == nil {
+		t.Fatal("safeUpdateScriptPath() accepted a relative path")
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "safe-update.sh")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	service.safeUpdateScript = path
+	if _, err := service.safeUpdateScriptPath(); err == nil {
+		t.Fatal("safeUpdateScriptPath() accepted a non-executable file")
+	}
+	if err := os.Chmod(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := service.safeUpdateScriptPath(); err != nil {
+		t.Fatalf("safeUpdateScriptPath() error = %v", err)
+	} else if got != path {
+		t.Fatalf("safeUpdateScriptPath() = %q, want %q", got, path)
+	}
+}
+
+func TestExecuteSafeUpdateScriptUsesServerControlledEnvironment(t *testing.T) {
+	dir := t.TempDir()
+	outputPath := filepath.Join(dir, "output")
+	scriptPath := filepath.Join(dir, "safe-update.sh")
+	script := "#!/bin/sh\nprintf '%s\\n%s\\n' \"$MINDFS_SAFE_UPDATE_EXECUTABLE\" \"$MINDFS_SAFE_UPDATE_VERSION\" >\"$SAFE_UPDATE_TEST_OUTPUT\"\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SAFE_UPDATE_TEST_OUTPUT", outputPath)
+
+	service := &Service{
+		executable:       "/opt/mindfs/bin/mindfs",
+		safeUpdateScript: scriptPath,
+		status: Status{
+			LatestVersion: "v1.2.3",
+		},
+	}
+	if err := service.executeSafeUpdateScript(context.Background()); err != nil {
+		t.Fatalf("executeSafeUpdateScript() error = %v", err)
+	}
+	payload, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(payload), "/opt/mindfs/bin/mindfs\nv1.2.3\n"; got != want {
+		t.Fatalf("script environment = %q, want %q", got, want)
+	}
+}
+
+func TestTriggerSafeUpdateWithoutScriptDoesNotFallBack(t *testing.T) {
+	t.Parallel()
+
+	service := &Service{
+		status: Status{
+			HasUpdate:     true,
+			LatestVersion: "v1.2.3",
+			Status:        "available",
+		},
+	}
+	if err := service.TriggerSafeUpdate(context.Background()); err == nil {
+		t.Fatal("TriggerSafeUpdate() error = nil, want missing-script error")
+	}
+	if got := service.GetStatus().Status; got != "available" {
+		t.Fatalf("status = %q, want available", got)
+	}
+}
+
 func TestFetchAndVerifyManifest(t *testing.T) {
 	publicKey, privateKey, err := ed25519.GenerateKey(nil)
 	if err != nil {

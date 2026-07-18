@@ -13,6 +13,7 @@ export type UpdateState = {
   published_at?: string;
   last_checked_at?: string;
   auto_update_supported?: boolean;
+  safe_update_supported?: boolean;
 };
 
 export async function fetchUpdateState(): Promise<UpdateState> {

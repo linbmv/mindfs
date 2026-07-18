@@ -356,6 +356,8 @@ func (h *HTTPHandler) Routes() http.Handler {
 	r.Post("/api/e2ee/open", h.handleE2EEOpen)
 	r.Get("/api/app/update", h.protectedEndpoint(h.handleAppUpdateGet))
 	r.Post("/api/app/update", h.protectedEndpoint(h.handleAppUpdatePost))
+	r.Get("/api/app/status", h.protectedEndpoint(h.handleAppStatusGet))
+	r.Post("/api/app/restart", h.protectedEndpoint(h.handleAppRestartPost))
 	r.Post("/api/imports/github", h.protectedEndpoint(h.handleGitHubImportStart))
 	r.Get("/api/web-push/status", h.protectedEndpoint(h.handleWebPushStatus))
 	r.Post("/api/web-push/subscriptions", h.protectedEndpoint(h.handleWebPushSubscriptionSave))
@@ -1187,11 +1189,36 @@ func (h *HTTPHandler) handleAppUpdatePost(w http.ResponseWriter, r *http.Request
 		respondError(w, http.StatusServiceUnavailable, errInvalidRequest("update service not configured"))
 		return
 	}
-	if err := h.AppContext.GetUpdateService().TriggerUpdate(r.Context()); err != nil {
+	// The Web UI is deliberately restricted to the locally configured safe
+	// source-update pipeline. Official release-package replacement remains a
+	// CLI-only operation and is never used as a fallback here.
+	if err := h.AppContext.GetUpdateService().TriggerSafeUpdate(r.Context()); err != nil {
 		respondError(w, http.StatusBadRequest, errInvalidRequest(err.Error()))
 		return
 	}
 	respondJSON(w, http.StatusOK, h.AppContext.GetUpdateService().GetStatus())
+}
+
+func (h *HTTPHandler) handleAppStatusGet(w http.ResponseWriter, r *http.Request) {
+	respondJSON(w, http.StatusOK, map[string]any{
+		"status":  "running",
+		"version": h.Version,
+		"pid":     os.Getpid(),
+	})
+}
+
+func (h *HTTPHandler) handleAppRestartPost(w http.ResponseWriter, r *http.Request) {
+	if h.AppContext == nil || h.AppContext.GetUpdateService() == nil {
+		respondError(w, http.StatusServiceUnavailable, errInvalidRequest("restart service not configured"))
+		return
+	}
+	if err := h.AppContext.GetUpdateService().RestartCurrent(); err != nil {
+		respondError(w, http.StatusBadRequest, errInvalidRequest(err.Error()))
+		return
+	}
+	respondJSON(w, http.StatusAccepted, map[string]any{
+		"status": "restarting",
+	})
 }
 
 func (h *HTTPHandler) handleLocalDirs(w http.ResponseWriter, r *http.Request) {

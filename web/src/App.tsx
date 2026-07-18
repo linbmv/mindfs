@@ -641,6 +641,7 @@ function normalizeUpdateState(
     published_at: input?.published_at || "",
     last_checked_at: input?.last_checked_at || "",
     auto_update_supported: input?.auto_update_supported === true,
+    safe_update_supported: input?.safe_update_supported === true,
   };
 }
 
@@ -690,7 +691,7 @@ function shouldShowUpdateButton(state: UpdateState): boolean {
   ) {
     return true;
   }
-  return state.auto_update_supported === true && state.has_update === true;
+  return state.safe_update_supported === true && state.has_update === true;
 }
 
 function buildFileScrollKey(
@@ -2498,11 +2499,7 @@ export function App({ onGoHome }: AppProps) {
       const target = next.latest_version
         ? `v${next.latest_version}`
         : "the latest version";
-      if (
-        !window.confirm(
-          `Install ${target} now? MindFS will restart after the update finishes.`,
-        )
-      ) {
+      if (!window.confirm(t("update.safeConfirm", { version: target }))) {
         return;
       }
     }
@@ -2524,7 +2521,7 @@ export function App({ onGoHome }: AppProps) {
     } finally {
       setUpdateSubmitting(false);
     }
-  }, [updateState]);
+  }, [t, updateState]);
 
   const playCompletionSound = useCallback(() => {
     const audioContext = ensureCompletionAudioContext();
