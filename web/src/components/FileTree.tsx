@@ -18,7 +18,6 @@ import {
   type AppearanceMode,
 } from "../services/appearance";
 import { useI18n, type Locale, type MessageKey } from "../i18n";
-import { AgentMenuList } from "./AgentMenuList";
 import { AgentIcon } from "./AgentIcon";
 import { SymlinkBadge } from "./SymlinkBadge";
 import { RelayLocalServicesDialog } from "./RelayLocalServicesDialog";
@@ -28,13 +27,16 @@ import {
   createAgentConfigBackup,
   deleteAgentAPIProvider,
   deleteAgentConfigBackup,
+  exportAgentConfigBackup,
   fetchAgentAPIProviders,
   fetchAgentConfigBackups,
   fetchAgentConfigDefaults,
+  importAgentConfigBackup,
   switchAgentAPIProvider,
   switchAgentConfig,
   type AgentAPIProvider,
   type AgentConfigBackup,
+  type PortableAgentConfig,
 } from "../services/agentConfig";
 import {
   getWebPushStatus,
@@ -58,6 +60,7 @@ type BeforeInstallPromptEvent = Event & {
 
 const PWA_INSTALL_STATE_KEY = "mindfs-pwa-installed";
 const RELAYER_AD_DISMISS_STORAGE_KEY = "mindfs-relayer-ad-dismissed";
+const AGENT_CONFIG_LAST_AGENT_STORAGE_KEY = "mindfs-agent-config-last-agent";
 
 const APPEARANCE_OPTIONS: Array<{ value: AppearanceMode; labelKey: MessageKey }> = [
   { value: "dark", labelKey: "appearance.dark" },
@@ -178,7 +181,7 @@ type FileTreeProps = {
 };
 
 type AgentConfigFlow = "backup" | "switch";
-type AgentConfigStep = "agent" | "details" | "confirm";
+type AgentConfigStep = "details" | "edit" | "confirm";
 type AgentConfigAddTab = "backup" | "api";
 type AgentConfigSwitchTab = "backup" | "api_provider";
 type AgentConfigSwitchSelection = { type: "backup" | "api_provider"; id: string };
@@ -478,6 +481,53 @@ function TrashIcon() {
   );
 }
 
+function CloseIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" aria-hidden="true">
+      <path d="M6 6l12 12" />
+      <path d="M18 6 6 18" />
+    </svg>
+  );
+}
+
+function EditIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M12 20h9" />
+      <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z" />
+    </svg>
+  );
+}
+
+function DownloadIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M12 3v12" />
+      <path d="m7 10 5 5 5-5" />
+      <path d="M5 21h14" />
+    </svg>
+  );
+}
+
+function UploadIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M12 16V4" />
+      <path d="m7 9 5-5 5 5" />
+      <path d="M5 21h14" />
+    </svg>
+  );
+}
+
+function AddIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" aria-hidden="true">
+      <path d="M12 5v14" />
+      <path d="M5 12h14" />
+    </svg>
+  );
+}
+
 function AgentConfigLineEditor({
   value,
   onChange,
@@ -586,6 +636,7 @@ function AgentConfigPopover({
   apiProviders,
   selectedBackupID,
   selectedAPIProviderID,
+  editConfig,
   confirmMessage,
   busy,
   error,
@@ -602,6 +653,12 @@ function AgentConfigPopover({
   onSelectedAPIProviderChange,
   onDeleteBackup,
   onDeleteAPIProvider,
+  onEditBackup,
+  onExportBackup,
+  onImportFile,
+  onEditConfigChange,
+  onSaveEdit,
+  onBackToDetails,
   onSave,
   onSwitch,
   onConfirm,
@@ -623,6 +680,7 @@ function AgentConfigPopover({
   apiProviders: AgentAPIProvider[];
   selectedBackupID: string;
   selectedAPIProviderID: string;
+  editConfig: PortableAgentConfig | null;
   confirmMessage: string;
   busy: boolean;
   error: string;
@@ -639,13 +697,21 @@ function AgentConfigPopover({
   onSelectedAPIProviderChange: (value: string) => void;
   onDeleteBackup: (id: string) => void;
   onDeleteAPIProvider: (id: string) => void;
+  onEditBackup: (id: string) => void;
+  onExportBackup: (id: string) => void;
+  onImportFile: (file: File) => void;
+  onEditConfigChange: (config: PortableAgentConfig) => void;
+  onSaveEdit: () => void;
+  onBackToDetails: () => void;
   onSave: () => void;
-  onSwitch: () => void;
+  onSwitch: (selection?: AgentConfigSwitchSelection) => void;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
   const { t } = useI18n();
-  const agentTitle = flow === "backup"
+  const agentTitle = step === "edit"
+    ? t("agentConfig.editTitle")
+    : flow === "backup"
     ? t("agentConfig.chooseBackupAgent")
     : t("agentConfig.chooseSwitchAgent");
   const confirmButtonLabel = flow === "backup" ? t("agentConfig.continueBackup") : t("agentConfig.continueSwitch");
@@ -669,56 +735,47 @@ function AgentConfigPopover({
         gap: "10px",
       }}
     >
-      {step === "agent" ? (
-        <div style={{ fontSize: "12px", fontWeight: 700, color: "var(--text-primary)" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: "8px", minWidth: 0 }}>
+        <div style={{ minWidth: 0, flex: 1, fontSize: "12px", fontWeight: 700, color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {agentTitle}
         </div>
+        <button
+          type="button"
+          aria-label={t("common.close")}
+          title={t("common.close")}
+          disabled={busy}
+          onClick={onCancel}
+          style={{ ...agentConfigIconButtonStyle(busy), color: "var(--text-secondary)" }}
+        >
+          <CloseIcon />
+        </button>
+      </div>
+      {step !== "confirm" && step !== "edit" ? (
+        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+          <AgentIcon agentName={selectedAgent || "codex"} style={{ width: "16px", height: "16px", flexShrink: 0 }} />
+          <select
+            value={selectedAgent}
+            disabled={busy || agents.length === 0}
+            aria-label={t("agentConfig.agent")}
+            onChange={(event) => onChooseAgent(event.target.value)}
+            style={{ ...agentConfigInputStyle, padding: "7px 30px 7px 9px", cursor: busy ? "wait" : "pointer" }}
+          >
+            {agents.length === 0 ? <option value="">{t("agentConfig.loading")}</option> : null}
+            {agents.map((agent) => (
+              <option key={agent.name} value={agent.name}>
+                {agent.name}{agent.last_config_selection?.name ? ` - ${agent.last_config_selection.name}` : ""}
+              </option>
+            ))}
+          </select>
+        </div>
       ) : null}
-      {step === "agent" ? (
-        <>
-          {busy ? (
-            <div style={agentConfigHintStyle}>{t("agentConfig.loading")}</div>
-          ) : agents.length === 0 ? (
-            <div style={agentConfigHintStyle}>{t("agentConfig.noInstalledAgents")}</div>
-          ) : (
-            <AgentMenuList
-              agents={agents}
-              selectedAgent={selectedAgent}
-              maxHeight="220px"
-              renderEnd={(agent) => {
-                const name = String(agent.last_config_selection?.name || "").trim();
-                if (!name) {
-                  return null;
-                }
-                return (
-                  <span
-                    title={t("agentConfig.lastSelected", { name })}
-                    style={{
-                      maxWidth: "120px",
-                      minWidth: 0,
-                      flexShrink: 1,
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                      fontSize: "11px",
-                      color: agent.name === selectedAgent ? "var(--accent-color)" : "var(--text-secondary)",
-                    }}
-                  >
-                    {name}
-                  </span>
-                );
-              }}
-              onSelect={onChooseAgent}
-            />
-          )}
-        </>
-      ) : step === "confirm" ? (
+      {step === "confirm" ? (
         <>
           <div style={{ ...agentConfigHintStyle, color: "#dc2626" }}>
             {confirmMessage || t("agentConfig.targetExists")}
           </div>
           <div style={agentConfigActionRowStyle}>
-            <button type="button" disabled={busy} onClick={onCancel} style={agentConfigSecondaryButtonStyle(busy)}>
+            <button type="button" disabled={busy} onClick={onBackToDetails} style={agentConfigSecondaryButtonStyle(busy)}>
               {t("common.cancel")}
             </button>
             <button type="button" disabled={busy} onClick={onConfirm} style={agentConfigPrimaryButtonStyle(busy)}>
@@ -726,6 +783,93 @@ function AgentConfigPopover({
             </button>
           </div>
         </>
+      ) : step === "edit" ? (
+        editConfig ? (
+          <>
+            <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) minmax(0, 1fr)", gap: "8px" }}>
+              <div style={agentConfigFieldStyle}>
+                <label style={agentConfigLabelStyle}>{t("agentConfig.agent")}</label>
+                <input value={editConfig.agent} readOnly style={{ ...agentConfigInputStyle, opacity: 0.75 }} />
+              </div>
+              <div style={agentConfigFieldStyle}>
+                <label style={agentConfigLabelStyle}>{t("agentConfig.backupName")}</label>
+                <input value={editConfig.name} readOnly style={{ ...agentConfigInputStyle, opacity: 0.75 }} />
+              </div>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: "8px", maxHeight: "340px", overflow: "auto" }}>
+              {(editConfig.files || []).map((file, index) => (
+                <div key={`${index}-${file.sourcePath}`} style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                    <input
+                      value={file.sourcePath}
+                      aria-label={t("agentConfig.fileSource", { index: index + 1 })}
+                      onChange={(event) => {
+                        const files = [...(editConfig.files || [])];
+                        files[index] = { ...file, sourcePath: event.target.value };
+                        onEditConfigChange({ ...editConfig, files });
+                      }}
+                      style={{ ...agentConfigInputStyle, flex: 1, minWidth: 0 }}
+                    />
+                    <button
+                      type="button"
+                      aria-label={t("agentConfig.removeFile", { index: index + 1 })}
+                      title={t("common.delete")}
+                      disabled={busy}
+                      onClick={() => onEditConfigChange({
+                        ...editConfig,
+                        files: (editConfig.files || []).filter((_, fileIndex) => fileIndex !== index),
+                      })}
+                      style={agentConfigIconButtonStyle(busy)}
+                    >
+                      <TrashIcon />
+                    </button>
+                  </div>
+                  <textarea
+                    value={file.content}
+                    aria-label={t("agentConfig.fileContent", { index: index + 1 })}
+                    onChange={(event) => {
+                      const files = [...(editConfig.files || [])];
+                      files[index] = { ...file, content: event.target.value };
+                      onEditConfigChange({ ...editConfig, files });
+                    }}
+                    rows={6}
+                    style={{ ...agentConfigInputStyle, minHeight: "112px", resize: "vertical", fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" }}
+                  />
+                </div>
+              ))}
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => onEditConfigChange({
+                  ...editConfig,
+                  files: [...(editConfig.files || []), { sourcePath: "", content: "" }],
+                })}
+                style={{ ...agentConfigSecondaryButtonStyle(busy), display: "inline-flex", alignItems: "center", justifyContent: "center", gap: "6px" }}
+              >
+                <AddIcon />
+                {t("agentConfig.addFile")}
+              </button>
+            </div>
+            <div style={agentConfigFieldStyle}>
+              <label style={agentConfigLabelStyle}>{t("agentConfig.env")}</label>
+              <AgentConfigLineEditor
+                value={(editConfig.envLines || []).join("\n")}
+                onChange={(value) => onEditConfigChange({ ...editConfig, envLines: value.split(/\r?\n/) })}
+                placeholder={t("agentConfig.envPlaceholder")}
+              />
+            </div>
+            <div style={agentConfigActionRowStyle}>
+              <button type="button" disabled={busy} onClick={onBackToDetails} style={agentConfigSecondaryButtonStyle(busy)}>
+                {t("common.cancel")}
+              </button>
+              <button type="button" disabled={busy} onClick={onSaveEdit} style={agentConfigPrimaryButtonStyle(busy)}>
+                {t("common.save")}
+              </button>
+            </div>
+          </>
+        ) : <div style={agentConfigHintStyle}>{t("agentConfig.loading")}</div>
+      ) : !selectedAgent ? (
+        <div style={agentConfigHintStyle}>{busy ? t("agentConfig.loading") : t("agentConfig.noInstalledAgents")}</div>
       ) : flow === "backup" ? (
         <>
           {addTabs.length > 1 ? (
@@ -851,6 +995,33 @@ function AgentConfigPopover({
               })}
             </div>
           ) : null}
+          {effectiveSwitchTab === "backup" ? (
+            <label
+              style={{
+                ...agentConfigSecondaryButtonStyle(busy),
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: "6px",
+              }}
+            >
+              <UploadIcon />
+              {t("agentConfig.importConfig")}
+              <input
+                type="file"
+                accept="application/json,.json"
+                disabled={busy}
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  event.currentTarget.value = "";
+                  if (file) {
+                    onImportFile(file);
+                  }
+                }}
+                style={{ display: "none" }}
+              />
+            </label>
+          ) : null}
           <div style={{ display: "flex", flexDirection: "column", gap: "8px", maxHeight: "260px", overflow: "auto" }}>
             {busy ? (
               <div style={agentConfigHintStyle}>{t("agentConfig.loading")}</div>
@@ -864,33 +1035,73 @@ function AgentConfigPopover({
                 return (
                   <div
                     key={item.id}
-                    onClick={() => onSelectedBackupChange(item.id)}
                     style={{
                       border: "1px solid var(--border-color)",
                       background: selected ? "var(--selection-bg)" : "transparent",
                       color: selected ? "var(--accent-color)" : "var(--text-primary)",
                       borderRadius: "8px",
-                      padding: "8px 10px",
-                      textAlign: "left",
-                      cursor: "pointer",
+                      padding: "4px",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "2px",
                     }}
                   >
-                    <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                      <div style={{ minWidth: 0, flex: 1, fontSize: "12px", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.name}</div>
-                      <button
-                        type="button"
-                        aria-label={t("agentConfig.deleteConfig", { name: item.name })}
-                        title={t("common.delete")}
-                        disabled={busy}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          onDeleteBackup(item.id);
-                        }}
-                        style={agentConfigIconButtonStyle(busy)}
-                      >
-                        <TrashIcon />
-                      </button>
-                    </div>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      title={t("agentConfig.switchConfig", { name: item.name })}
+                      onClick={() => {
+                        onSelectedBackupChange(item.id);
+                        onSwitch({ type: "backup", id: item.id });
+                      }}
+                      style={{
+                        minWidth: 0,
+                        flex: 1,
+                        border: "none",
+                        background: "transparent",
+                        color: "inherit",
+                        padding: "5px 6px",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "8px",
+                        cursor: busy ? "wait" : "pointer",
+                        textAlign: "left",
+                      }}
+                    >
+                      <AgentIcon agentName={item.agent} style={{ width: "14px", height: "14px", flexShrink: 0 }} />
+                      <span style={{ minWidth: 0, flex: 1, fontSize: "12px", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.name}</span>
+                      <ConfigSwitchIcon />
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={t("agentConfig.editConfig", { name: item.name })}
+                      title={t("agentConfig.edit")}
+                      disabled={busy}
+                      onClick={() => onEditBackup(item.id)}
+                      style={{ ...agentConfigIconButtonStyle(busy), color: "var(--text-secondary)" }}
+                    >
+                      <EditIcon />
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={t("agentConfig.exportConfig", { name: item.name })}
+                      title={t("agentConfig.export")}
+                      disabled={busy}
+                      onClick={() => onExportBackup(item.id)}
+                      style={{ ...agentConfigIconButtonStyle(busy), color: "var(--text-secondary)" }}
+                    >
+                      <DownloadIcon />
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={t("agentConfig.deleteConfig", { name: item.name })}
+                      title={t("common.delete")}
+                      disabled={busy}
+                      onClick={() => onDeleteBackup(item.id)}
+                      style={agentConfigIconButtonStyle(busy)}
+                    >
+                      <TrashIcon />
+                    </button>
                   </div>
                 );
               })
@@ -903,53 +1114,59 @@ function AgentConfigPopover({
                 return (
                   <div
                     key={item.id}
-                    onClick={() => onSelectedAPIProviderChange(item.id)}
                     style={{
                       border: "1px solid var(--border-color)",
                       background: selected ? "var(--selection-bg)" : "transparent",
                       color: selected ? "var(--accent-color)" : "var(--text-primary)",
                       borderRadius: "8px",
-                      padding: "8px 10px",
-                      textAlign: "left",
-                      cursor: "pointer",
+                      padding: "4px",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "2px",
                     }}
                   >
-                    <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      title={t("agentConfig.switchConfig", { name: item.name })}
+                      onClick={() => {
+                        onSelectedAPIProviderChange(item.id);
+                        onSwitch({ type: "api_provider", id: item.id });
+                      }}
+                      style={{
+                        minWidth: 0,
+                        flex: 1,
+                        border: "none",
+                        background: "transparent",
+                        color: "inherit",
+                        padding: "5px 6px",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "8px",
+                        cursor: busy ? "wait" : "pointer",
+                        textAlign: "left",
+                      }}
+                    >
                       <div style={{ minWidth: 0, flex: 1 }}>
                         <div style={{ fontSize: "12px", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.name}</div>
                         <div style={{ marginTop: "4px", fontSize: "11px", color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{summary}</div>
                       </div>
-                      <button
-                        type="button"
-                        aria-label={t("agentConfig.deleteAPIProvider", { name: item.name })}
-                        title={t("common.delete")}
-                        disabled={busy}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          onDeleteAPIProvider(item.id);
-                        }}
-                        style={agentConfigIconButtonStyle(busy)}
-                      >
-                        <TrashIcon />
-                      </button>
-                    </div>
+                      <ConfigSwitchIcon />
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={t("agentConfig.deleteAPIProvider", { name: item.name })}
+                      title={t("common.delete")}
+                      disabled={busy}
+                      onClick={() => onDeleteAPIProvider(item.id)}
+                      style={agentConfigIconButtonStyle(busy)}
+                    >
+                      <TrashIcon />
+                    </button>
                   </div>
                 );
               })
             )}
-          </div>
-          <div style={agentConfigActionRowStyle}>
-            <button type="button" disabled={busy} onClick={onCancel} style={agentConfigSecondaryButtonStyle(busy)}>
-              {t("common.cancel")}
-            </button>
-            <button
-              type="button"
-              disabled={busy || (effectiveSwitchTab === "backup" ? !selectedBackupID : !selectedAPIProviderID)}
-              onClick={onSwitch}
-              style={agentConfigPrimaryButtonStyle(busy || (effectiveSwitchTab === "backup" ? !selectedBackupID : !selectedAPIProviderID))}
-            >
-              {t("agentConfig.switch")}
-            </button>
           </div>
         </>
       )}
@@ -1318,7 +1535,7 @@ export function FileTree({
   );
   const [activeRelayTipIndex, setActiveRelayTipIndex] = React.useState(0);
   const [agentConfigFlow, setAgentConfigFlow] = React.useState<AgentConfigFlow | null>(null);
-  const [agentConfigStep, setAgentConfigStep] = React.useState<AgentConfigStep>("agent");
+  const [agentConfigStep, setAgentConfigStep] = React.useState<AgentConfigStep>("details");
   const [agentConfigAgents, setAgentConfigAgents] = React.useState<AgentStatus[]>([]);
   const [agentConfigAgent, setAgentConfigAgent] = React.useState("");
   const [agentConfigAddTab, setAgentConfigAddTab] = React.useState<AgentConfigAddTab>("backup");
@@ -1333,6 +1550,7 @@ export function FileTree({
   const [agentAPIProviders, setAgentAPIProviders] = React.useState<AgentAPIProvider[]>([]);
   const [selectedAgentConfigID, setSelectedAgentConfigID] = React.useState("");
   const [selectedAgentAPIProviderID, setSelectedAgentAPIProviderID] = React.useState("");
+  const [agentConfigEdit, setAgentConfigEdit] = React.useState<PortableAgentConfig | null>(null);
   const [agentConfigSwitchSelection, setAgentConfigSwitchSelection] = React.useState<AgentConfigSwitchSelection | null>(null);
   const [agentConfigPreferredProviderIDs, setAgentConfigPreferredProviderIDs] = React.useState<string[]>([]);
   const [agentConfigConfirmMessage, setAgentConfigConfirmMessage] = React.useState("");
@@ -1373,6 +1591,7 @@ export function FileTree({
   });
   const menuRef = React.useRef<HTMLDivElement | null>(null);
   const agentConfigPopoverRef = React.useRef<HTMLDivElement | null>(null);
+  const agentConfigAutoSelectPendingRef = React.useRef(false);
   const agentLifecyclePopoverRef = React.useRef<HTMLDivElement | null>(null);
   const relayServicesPopoverRef = React.useRef<HTMLDivElement | null>(null);
   const updateNotesRef = React.useRef<HTMLDivElement | null>(null);
@@ -1778,8 +1997,10 @@ export function FileTree({
   const openAgentConfigFlow = React.useCallback((flow: AgentConfigFlow) => {
     setAgentLifecycleOpen(false);
     setAgentConfigFlow(flow);
-    setAgentConfigStep("agent");
+    setAgentConfigStep("details");
     setAgentConfigAgent("");
+    setAgentConfigEdit(null);
+    agentConfigAutoSelectPendingRef.current = false;
     setAgentConfigAddTab("backup");
     setAgentConfigSwitchTab("backup");
     setAgentConfigName("");
@@ -1853,8 +2074,10 @@ export function FileTree({
       .filter(Boolean);
     setAgentLifecycleOpen(false);
     setAgentConfigFlow("switch");
-    setAgentConfigStep("agent");
+    setAgentConfigStep("details");
     setAgentConfigAgent("");
+    setAgentConfigEdit(null);
+    agentConfigAutoSelectPendingRef.current = false;
     setAgentConfigAddTab("backup");
     setAgentConfigSwitchTab("api_provider");
     setAgentConfigName("");
@@ -1885,7 +2108,8 @@ export function FileTree({
 
   const closeAgentConfigFlow = React.useCallback(() => {
     setAgentConfigFlow(null);
-    setAgentConfigStep("agent");
+    setAgentConfigStep("details");
+    setAgentConfigEdit(null);
     setAgentConfigError("");
     setAgentConfigConfirmMessage("");
     setAgentConfigSwitchSelection(null);
@@ -1915,7 +2139,7 @@ export function FileTree({
   }, []);
 
   React.useEffect(() => {
-    if (!agentConfigFlow || agentConfigStep !== "agent") {
+    if (!agentConfigFlow) {
       return;
     }
     const handlePointerDown = (event: MouseEvent) => {
@@ -1925,7 +2149,7 @@ export function FileTree({
     };
     document.addEventListener("mousedown", handlePointerDown);
     return () => document.removeEventListener("mousedown", handlePointerDown);
-  }, [agentConfigFlow, agentConfigStep, closeAgentConfigFlow]);
+  }, [agentConfigFlow, closeAgentConfigFlow]);
 
   React.useEffect(() => {
     if (!agentLifecycleOpen) {
@@ -1983,8 +2207,14 @@ export function FileTree({
 
   const chooseAgentForConfig = React.useCallback(async (agentName: string) => {
     setAgentConfigAgent(agentName);
+    setAgentConfigEdit(null);
     setAgentConfigError("");
     setAgentConfigBusy(true);
+    try {
+      window.localStorage.setItem(AGENT_CONFIG_LAST_AGENT_STORAGE_KEY, agentName);
+    } catch {
+      // Storage can be unavailable in private browsing or restricted webviews.
+    }
     try {
       const selectedAgent = agentConfigAgents.find((item) => item.name === agentName);
       const supportsAPIProvider = Boolean(selectedAgent?.supports_api_provider_switch);
@@ -2005,10 +2235,25 @@ export function FileTree({
         ]);
         setAgentConfigBackups(backups);
         setAgentAPIProviders(providers);
-        setSelectedAgentConfigID("");
+        const lastSelection = selectedAgent?.last_config_selection;
+        const lastBackupID = lastSelection?.type === "backup" && backups.some((item) => item.id === lastSelection.id)
+          ? String(lastSelection.id || "")
+          : "";
         const preferredProvider = providers.find((provider) => agentConfigPreferredProviderIDs.includes(provider.id));
-        setSelectedAgentAPIProviderID(preferredProvider?.id || "");
-        setAgentConfigSwitchSelection(preferredProvider ? { type: "api_provider", id: preferredProvider.id } : null);
+        const lastProviderID = preferredProvider?.id || (
+          lastSelection?.type === "api_provider" && providers.some((item) => item.id === lastSelection.id)
+            ? String(lastSelection.id || "")
+            : ""
+        );
+        setSelectedAgentConfigID(lastBackupID);
+        setSelectedAgentAPIProviderID(lastProviderID);
+        setAgentConfigSwitchSelection(
+          lastProviderID
+            ? { type: "api_provider", id: lastProviderID }
+            : lastBackupID
+              ? { type: "backup", id: lastBackupID }
+              : null,
+        );
         setAgentConfigSwitchTab(supportsAPIProvider && selectedAgent?.last_config_selection?.type === "api_provider" ? "api_provider" : "backup");
         if (supportsAPIProvider && agentConfigPreferredProviderIDs.length > 0) {
           setAgentConfigSwitchTab("api_provider");
@@ -2021,6 +2266,29 @@ export function FileTree({
       setAgentConfigBusy(false);
     }
   }, [agentConfigAgents, agentConfigFlow, agentConfigPreferredProviderIDs, t]);
+
+  React.useEffect(() => {
+    if (!agentConfigFlow || agentConfigAgent || agentConfigBusy || agentConfigAgents.length === 0 || agentConfigAutoSelectPendingRef.current) {
+      return;
+    }
+    let savedAgent = "";
+    try {
+      savedAgent = window.localStorage.getItem(AGENT_CONFIG_LAST_AGENT_STORAGE_KEY) || "";
+    } catch {
+      savedAgent = "";
+    }
+    const preferred = agentConfigAgents.find((item) => item.name === savedAgent)
+      || agentConfigAgents.find((item) => item.name === "codex")
+      || agentConfigAgents.find((item) => Boolean(item.last_config_selection?.id))
+      || agentConfigAgents[0];
+    if (!preferred) {
+      return;
+    }
+    agentConfigAutoSelectPendingRef.current = true;
+    void chooseAgentForConfig(preferred.name).finally(() => {
+      agentConfigAutoSelectPendingRef.current = false;
+    });
+  }, [agentConfigAgent, agentConfigAgents, agentConfigBusy, agentConfigFlow, chooseAgentForConfig]);
 
   const saveAgentConfigBackup = React.useCallback(async (overwrite = false) => {
     if (!agentConfigName.trim()) {
@@ -2081,20 +2349,34 @@ export function FileTree({
     }
   }, [agentAPIProviderAPIKey, agentAPIProviderBaseURL, agentAPIProviderName, closeAgentConfigFlow, t]);
 
-  const runAgentConfigSwitch = React.useCallback(async (confirmOverwrite = false) => {
-    if (!agentConfigSwitchSelection) {
+  const runAgentConfigSwitch = React.useCallback(async (
+    confirmOverwrite = false,
+    selectionOverride?: AgentConfigSwitchSelection,
+  ) => {
+    const selection = selectionOverride || agentConfigSwitchSelection;
+    if (!selection) {
       setAgentConfigError(t("agentConfig.selectConfig"));
       return;
+    }
+    if (selectionOverride) {
+      setAgentConfigSwitchSelection(selectionOverride);
+      if (selectionOverride.type === "backup") {
+        setSelectedAgentConfigID(selectionOverride.id);
+        setSelectedAgentAPIProviderID("");
+      } else {
+        setSelectedAgentAPIProviderID(selectionOverride.id);
+        setSelectedAgentConfigID("");
+      }
     }
     setAgentConfigBusy(true);
     setAgentConfigError("");
     try {
-      if (agentConfigSwitchSelection.type === "api_provider") {
-        await switchAgentAPIProvider({ agent: agentConfigAgent, providerID: agentConfigSwitchSelection.id });
+      if (selection.type === "api_provider") {
+        await switchAgentAPIProvider({ agent: agentConfigAgent, providerID: selection.id });
         closeAgentConfigFlow();
         return;
       }
-      const result = await switchAgentConfig({ id: agentConfigSwitchSelection.id, confirmOverwrite });
+      const result = await switchAgentConfig({ id: selection.id, confirmOverwrite });
       if (result.needs_confirm) {
         setAgentConfigConfirmMessage(result.message || t("agentConfig.targetExists"));
         setAgentConfigStep("confirm");
@@ -2108,9 +2390,120 @@ export function FileTree({
     }
   }, [agentConfigAgent, agentConfigSwitchSelection, closeAgentConfigFlow, t]);
 
+  const editAgentConfigBackup = React.useCallback(async (id: string) => {
+    setAgentConfigBusy(true);
+    setAgentConfigError("");
+    try {
+      const config = await exportAgentConfigBackup(id);
+      setAgentConfigEdit(config);
+      setAgentConfigStep("edit");
+    } catch (error) {
+      setAgentConfigError(error instanceof Error ? error.message : t("agentConfig.exportFailed"));
+    } finally {
+      setAgentConfigBusy(false);
+    }
+  }, [t]);
+
+  const exportSelectedAgentConfigBackup = React.useCallback(async (id: string) => {
+    setAgentConfigBusy(true);
+    setAgentConfigError("");
+    try {
+      const config = await exportAgentConfigBackup(id);
+      const payload = `${JSON.stringify(config, null, 2)}\n`;
+      const blob = new Blob([payload], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `${config.agent}-${config.name}.mindfs-agent.json`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      setAgentConfigError(error instanceof Error ? error.message : t("agentConfig.exportFailed"));
+    } finally {
+      setAgentConfigBusy(false);
+    }
+  }, [t]);
+
+  const refreshImportedAgentConfig = React.useCallback(async (agentName: string, selectedID: string) => {
+    const selectedAgent = agentConfigAgents.find((item) => item.name === agentName);
+    const supportsAPIProvider = Boolean(selectedAgent?.supports_api_provider_switch);
+    const [backups, providers] = await Promise.all([
+      fetchAgentConfigBackups(agentName),
+      supportsAPIProvider ? fetchAgentAPIProviders(agentName) : Promise.resolve([]),
+    ]);
+    setAgentConfigAgent(agentName);
+    setAgentConfigBackups(backups);
+    setAgentAPIProviders(providers);
+    setAgentConfigSwitchTab("backup");
+    setSelectedAgentConfigID(selectedID);
+    setSelectedAgentAPIProviderID("");
+    setAgentConfigSwitchSelection({ type: "backup", id: selectedID });
+    setAgentConfigStep("details");
+    setAgentConfigEdit(null);
+    try {
+      window.localStorage.setItem(AGENT_CONFIG_LAST_AGENT_STORAGE_KEY, agentName);
+    } catch {
+      // Ignore unavailable browser storage.
+    }
+  }, [agentConfigAgents]);
+
+  const importAgentConfigFile = React.useCallback(async (file: File) => {
+    setAgentConfigBusy(true);
+    setAgentConfigError("");
+    try {
+      if (file.size > 64 * 1024 * 1024) {
+        throw new Error(t("agentConfig.importTooLarge"));
+      }
+      const parsed = JSON.parse(await file.text()) as PortableAgentConfig;
+      let saved: AgentConfigBackup;
+      try {
+        saved = await importAgentConfigBackup(parsed, false);
+      } catch (error) {
+        if (!isAgentConfigBackupConflict(error) || !window.confirm(t("agentConfig.importOverwriteConfirm"))) {
+          throw error;
+        }
+        saved = await importAgentConfigBackup(parsed, true);
+      }
+      await refreshImportedAgentConfig(saved.agent, saved.id);
+    } catch (error) {
+      setAgentConfigError(error instanceof Error ? error.message : t("agentConfig.importFailed"));
+    } finally {
+      setAgentConfigBusy(false);
+    }
+  }, [refreshImportedAgentConfig, t]);
+
+  const saveEditedAgentConfig = React.useCallback(async () => {
+    if (!agentConfigEdit) {
+      return;
+    }
+    setAgentConfigBusy(true);
+    setAgentConfigError("");
+    try {
+      const saved = await importAgentConfigBackup(agentConfigEdit, true);
+      await refreshImportedAgentConfig(saved.agent, saved.id);
+    } catch (error) {
+      setAgentConfigError(error instanceof Error ? error.message : t("agentConfig.editFailed"));
+    } finally {
+      setAgentConfigBusy(false);
+    }
+  }, [agentConfigEdit, refreshImportedAgentConfig, t]);
+
+  const returnToAgentConfigDetails = React.useCallback(() => {
+    setAgentConfigStep("details");
+    setAgentConfigEdit(null);
+    setAgentConfigConfirmMessage("");
+    setAgentConfigError("");
+  }, []);
+
   const deleteSelectedAgentConfigBackup = React.useCallback(async (id: string) => {
     const trimmedID = String(id || "").trim();
     if (!trimmedID) {
+      return;
+    }
+    const backup = agentConfigBackups.find((item) => item.id === trimmedID);
+    if (!window.confirm(t("agentConfig.deleteConfirm", { name: backup?.name || trimmedID }))) {
       return;
     }
     setAgentConfigBusy(true);
@@ -2134,6 +2527,10 @@ export function FileTree({
   const deleteSelectedAgentAPIProvider = React.useCallback(async (id: string) => {
     const trimmedID = String(id || "").trim();
     if (!trimmedID) {
+      return;
+    }
+    const provider = agentAPIProviders.find((item) => item.id === trimmedID);
+    if (!window.confirm(t("agentConfig.deleteConfirm", { name: provider?.name || trimmedID }))) {
       return;
     }
     setAgentConfigBusy(true);
@@ -2989,6 +3386,7 @@ export function FileTree({
               apiProviders={agentAPIProviders}
               selectedBackupID={selectedAgentConfigID}
               selectedAPIProviderID={selectedAgentAPIProviderID}
+              editConfig={agentConfigEdit}
               confirmMessage={agentConfigConfirmMessage}
               busy={agentConfigBusy}
               error={agentConfigError}
@@ -3011,6 +3409,20 @@ export function FileTree({
               onDeleteAPIProvider={(id) => {
                 void deleteSelectedAgentAPIProvider(id);
               }}
+              onEditBackup={(id) => {
+                void editAgentConfigBackup(id);
+              }}
+              onExportBackup={(id) => {
+                void exportSelectedAgentConfigBackup(id);
+              }}
+              onImportFile={(file) => {
+                void importAgentConfigFile(file);
+              }}
+              onEditConfigChange={setAgentConfigEdit}
+              onSaveEdit={() => {
+                void saveEditedAgentConfig();
+              }}
+              onBackToDetails={returnToAgentConfigDetails}
               onSave={() => {
                 if (agentConfigAddTab === "api") {
                   void saveAgentAPIProvider();
@@ -3018,8 +3430,8 @@ export function FileTree({
                 }
                 void saveAgentConfigBackup();
               }}
-              onSwitch={() => {
-                void runAgentConfigSwitch(false);
+              onSwitch={(selection) => {
+                void runAgentConfigSwitch(false, selection);
               }}
               onConfirm={() => {
                 if (agentConfigFlow === "backup") {

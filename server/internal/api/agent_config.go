@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"mindfs/server/internal/agent"
 	"mindfs/server/internal/apperr"
@@ -48,11 +49,31 @@ type agentConfigSwitchRequest struct {
 	ConfirmOverwrite bool   `json:"confirm_overwrite"`
 }
 
+type portableAgentConfigFile struct {
+	SourcePath string `json:"sourcePath"`
+	Content    string `json:"content"`
+}
+
+type portableAgentConfig struct {
+	Version  int                       `json:"version"`
+	Agent    string                    `json:"agent"`
+	Name     string                    `json:"name"`
+	Files    []portableAgentConfigFile `json:"files,omitempty"`
+	EnvLines []string                  `json:"envLines,omitempty"`
+}
+
+type agentConfigImportRequest struct {
+	Config    portableAgentConfig `json:"config"`
+	Overwrite bool                `json:"overwrite"`
+}
+
 type agentRestartRequest struct {
 	Agent string `json:"agent"`
 }
 
 var agentConfigNamePattern = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+const portableAgentConfigVersion = 1
 
 func (h *HTTPHandler) handleAgentConfigDefaults(w http.ResponseWriter, r *http.Request) {
 	agentName := strings.TrimSpace(r.URL.Query().Get("agent"))
@@ -127,6 +148,38 @@ func (h *HTTPHandler) handleAgentConfigBackupDelete(w http.ResponseWriter, r *ht
 		return
 	}
 	respondJSON(w, http.StatusOK, map[string]any{"deleted": true, "id": id, "backups": manifest})
+}
+
+func (h *HTTPHandler) handleAgentConfigExport(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	if id == "" {
+		respondError(w, http.StatusBadRequest, errInvalidRequest("backup id required"))
+		return
+	}
+	bundle, err := exportAgentConfigBackup(id)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, err)
+		return
+	}
+	respondJSON(w, http.StatusOK, bundle)
+}
+
+func (h *HTTPHandler) handleAgentConfigImport(w http.ResponseWriter, r *http.Request) {
+	var req agentConfigImportRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxUploadRequestBytes)).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, errInvalidRequest("invalid request body"))
+		return
+	}
+	entry, err := importAgentConfigBackup(req.Config, req.Overwrite)
+	if err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, errAgentConfigConflict) {
+			status = http.StatusConflict
+		}
+		respondError(w, status, err)
+		return
+	}
+	respondJSON(w, http.StatusOK, entry)
 }
 
 func (h *HTTPHandler) handleAgentConfigSwitch(w http.ResponseWriter, r *http.Request) {
@@ -310,6 +363,268 @@ func deleteAgentConfigBackup(id string) ([]agentConfigManifestEntry, error) {
 		}
 	}
 	return next, nil
+}
+
+func exportAgentConfigBackup(id string) (portableAgentConfig, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return portableAgentConfig{}, errors.New("backup id required")
+	}
+	manifest, err := readAgentConfigManifest()
+	if err != nil {
+		return portableAgentConfig{}, err
+	}
+	var entry agentConfigManifestEntry
+	for _, item := range manifest {
+		if item.ID == id {
+			entry = item
+			break
+		}
+	}
+	if entry.ID == "" {
+		return portableAgentConfig{}, errors.New("backup not found")
+	}
+	configRoot, err := agentConfigRootDir()
+	if err != nil {
+		return portableAgentConfig{}, err
+	}
+	bundle := portableAgentConfig{
+		Version: portableAgentConfigVersion,
+		Agent:   entry.Agent,
+		Name:    entry.Name,
+	}
+	totalSize := 0
+	for _, source := range entry.Sources {
+		path, err := safeAgentConfigBackupPath(configRoot, source.BackupPath)
+		if err != nil {
+			return portableAgentConfig{}, err
+		}
+		payload, err := os.ReadFile(path)
+		if err != nil {
+			return portableAgentConfig{}, apperr.Wrap("read", path, err)
+		}
+		if !utf8.Valid(payload) {
+			return portableAgentConfig{}, fmt.Errorf("config file is not UTF-8 text: %s", source.SourcePath)
+		}
+		totalSize += len(payload)
+		if totalSize > maxUploadRequestBytes {
+			return portableAgentConfig{}, errors.New("exported config is too large")
+		}
+		bundle.Files = append(bundle.Files, portableAgentConfigFile{
+			SourcePath: source.SourcePath,
+			Content:    string(payload),
+		})
+	}
+	envBackups, err := readAgentEnvBackups()
+	if err != nil {
+		return portableAgentConfig{}, err
+	}
+	bundle.EnvLines = append([]string(nil), envBackups[id]...)
+	return bundle, nil
+}
+
+func importAgentConfigBackup(bundle portableAgentConfig, overwrite bool) (entry agentConfigManifestEntry, err error) {
+	if bundle.Version != portableAgentConfigVersion {
+		return agentConfigManifestEntry{}, fmt.Errorf("unsupported config export version: %d", bundle.Version)
+	}
+	agentName, backupName, id, err := normalizeAgentConfigRequest(bundle.Agent, bundle.Name)
+	if err != nil {
+		return agentConfigManifestEntry{}, err
+	}
+	cfg, err := agent.LoadConfig("")
+	if err != nil {
+		return agentConfigManifestEntry{}, err
+	}
+	if _, ok := cfg.GetAgent(agentName); !ok {
+		return agentConfigManifestEntry{}, fmt.Errorf("agent not configured: %s", agentName)
+	}
+
+	manifest, err := readAgentConfigManifest()
+	if err != nil {
+		return agentConfigManifestEntry{}, err
+	}
+	existingIndex := -1
+	createdAt := ""
+	for index, item := range manifest {
+		if item.ID != id {
+			continue
+		}
+		if !overwrite {
+			return agentConfigManifestEntry{}, errAgentConfigConflict
+		}
+		existingIndex = index
+		createdAt = item.CreatedAt
+		break
+	}
+
+	type importedFile struct {
+		sourcePath string
+		content    string
+		name       string
+	}
+	files := make([]importedFile, 0, len(bundle.Files))
+	seenSources := map[string]bool{}
+	totalSize := 0
+	for _, file := range bundle.Files {
+		sourcePath, err := expandUserPath(file.SourcePath)
+		if err != nil {
+			return agentConfigManifestEntry{}, err
+		}
+		if sourcePath == "" || !filepath.IsAbs(sourcePath) {
+			return agentConfigManifestEntry{}, fmt.Errorf("config source path must be absolute: %s", file.SourcePath)
+		}
+		if seenSources[sourcePath] {
+			return agentConfigManifestEntry{}, fmt.Errorf("duplicate config source path: %s", sourcePath)
+		}
+		name := filepath.Base(sourcePath)
+		if name == "." || name == string(filepath.Separator) || name == "" {
+			return agentConfigManifestEntry{}, fmt.Errorf("invalid config source path: %s", sourcePath)
+		}
+		totalSize += len(file.Content)
+		if totalSize > maxUploadRequestBytes {
+			return agentConfigManifestEntry{}, errors.New("imported config is too large")
+		}
+		seenSources[sourcePath] = true
+		files = append(files, importedFile{sourcePath: sourcePath, content: file.Content, name: name})
+	}
+	envLines, envKeys, err := normalizeEnvLines(bundle.EnvLines)
+	if err != nil {
+		return agentConfigManifestEntry{}, err
+	}
+	if len(files) == 0 && len(envLines) == 0 {
+		return agentConfigManifestEntry{}, errors.New("config file or environment variables required")
+	}
+
+	configRoot, err := agentConfigRootDir()
+	if err != nil {
+		return agentConfigManifestEntry{}, err
+	}
+	if err := os.MkdirAll(configRoot, 0o700); err != nil {
+		return agentConfigManifestEntry{}, apperr.Wrap("mkdir", configRoot, err)
+	}
+	if err := os.Chmod(configRoot, 0o700); err != nil {
+		return agentConfigManifestEntry{}, apperr.Wrap("chmod", configRoot, err)
+	}
+	stageDir, err := os.MkdirTemp(configRoot, ".import-"+id+"-")
+	if err != nil {
+		return agentConfigManifestEntry{}, apperr.Wrap("mkdir", configRoot, err)
+	}
+	defer func() {
+		if stageDir != "" {
+			_ = os.RemoveAll(stageDir)
+		}
+	}()
+	if err := os.Chmod(stageDir, 0o700); err != nil {
+		return agentConfigManifestEntry{}, apperr.Wrap("chmod", stageDir, err)
+	}
+
+	now := time.Now().Format(time.RFC3339)
+	if createdAt == "" {
+		createdAt = now
+	}
+	entry = agentConfigManifestEntry{
+		ID:        id,
+		Agent:     agentName,
+		Name:      backupName,
+		CreatedAt: createdAt,
+		UpdatedAt: now,
+		EnvKeys:   envKeys,
+	}
+	for index, file := range files {
+		name := fmt.Sprintf("%03d-%s", index+1, file.name)
+		if err := os.WriteFile(filepath.Join(stageDir, name), []byte(file.content), 0o600); err != nil {
+			return agentConfigManifestEntry{}, apperr.Wrap("write", filepath.Join(stageDir, name), err)
+		}
+		entry.Sources = append(entry.Sources, agentConfigSource{
+			SourcePath: file.sourcePath,
+			BackupPath: filepath.ToSlash(filepath.Join(id, name)),
+		})
+	}
+
+	finalDir := filepath.Join(configRoot, id)
+	previousDir := ""
+	if _, statErr := os.Stat(finalDir); statErr == nil {
+		previousDir, err = os.MkdirTemp(configRoot, ".previous-"+id+"-")
+		if err != nil {
+			return agentConfigManifestEntry{}, apperr.Wrap("mkdir", configRoot, err)
+		}
+		if err := os.Remove(previousDir); err != nil {
+			return agentConfigManifestEntry{}, apperr.Wrap("remove", previousDir, err)
+		}
+		if err := os.Rename(finalDir, previousDir); err != nil {
+			return agentConfigManifestEntry{}, apperr.Wrap("rename", finalDir, err)
+		}
+	} else if !os.IsNotExist(statErr) {
+		return agentConfigManifestEntry{}, apperr.Wrap("stat", finalDir, statErr)
+	}
+	rollbackDir := true
+	defer func() {
+		if !rollbackDir {
+			return
+		}
+		_ = os.RemoveAll(finalDir)
+		if previousDir != "" {
+			_ = os.Rename(previousDir, finalDir)
+		}
+	}()
+	if err := os.Rename(stageDir, finalDir); err != nil {
+		return agentConfigManifestEntry{}, apperr.Wrap("rename", stageDir, err)
+	}
+	stageDir = ""
+
+	envBackups, err := readAgentEnvBackups()
+	if err != nil {
+		return agentConfigManifestEntry{}, err
+	}
+	previousEnvLines, hadPreviousEnv := envBackups[id]
+	if len(envLines) > 0 {
+		envBackups[id] = envLines
+	} else {
+		delete(envBackups, id)
+	}
+	if err := writeAgentEnvBackups(envBackups); err != nil {
+		return agentConfigManifestEntry{}, err
+	}
+	rollbackEnv := true
+	defer func() {
+		if !rollbackEnv {
+			return
+		}
+		if hadPreviousEnv {
+			envBackups[id] = previousEnvLines
+		} else {
+			delete(envBackups, id)
+		}
+		_ = writeAgentEnvBackups(envBackups)
+	}()
+
+	if existingIndex >= 0 {
+		manifest[existingIndex] = entry
+	} else {
+		manifest = append(manifest, entry)
+	}
+	if err := writeAgentConfigManifest(manifest); err != nil {
+		return agentConfigManifestEntry{}, err
+	}
+	rollbackEnv = false
+	rollbackDir = false
+	if previousDir != "" {
+		_ = os.RemoveAll(previousDir)
+	}
+	return entry, nil
+}
+
+func safeAgentConfigBackupPath(configRoot, relativePath string) (string, error) {
+	cleanRoot := filepath.Clean(configRoot)
+	path := filepath.Clean(filepath.Join(cleanRoot, filepath.FromSlash(relativePath)))
+	relative, err := filepath.Rel(cleanRoot, path)
+	if err != nil {
+		return "", err
+	}
+	if relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", errors.New("invalid config backup path")
+	}
+	return path, nil
 }
 
 func switchAgentConfig(req agentConfigSwitchRequest, app *AppContext) (agentConfigManifestEntry, bool, error) {

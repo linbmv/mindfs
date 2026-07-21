@@ -33,6 +33,19 @@ export type AgentConfigDefaults = {
   env_keys: string[];
 };
 
+export type PortableAgentConfigFile = {
+  sourcePath: string;
+  content: string;
+};
+
+export type PortableAgentConfig = {
+  version: number;
+  agent: string;
+  name: string;
+  files?: PortableAgentConfigFile[];
+  envLines?: string[];
+};
+
 export async function fetchAgentConfigDefaults(agent: string): Promise<AgentConfigDefaults> {
   const params = new URLSearchParams({ agent });
   return protectedJSON<AgentConfigDefaults>(appPath(`/api/agent-config/defaults?${params.toString()}`));
@@ -67,6 +80,22 @@ export async function deleteAgentConfigBackup(id: string): Promise<{ deleted: bo
   const params = new URLSearchParams({ id });
   return protectedJSON<{ deleted: boolean; id: string; backups?: AgentConfigBackup[] }>(appPath(`/api/agent-config/backups?${params.toString()}`), {
     method: "DELETE",
+  });
+}
+
+export async function exportAgentConfigBackup(id: string): Promise<PortableAgentConfig> {
+  const params = new URLSearchParams({ id });
+  return protectedJSON<PortableAgentConfig>(appPath(`/api/agent-config/export?${params.toString()}`));
+}
+
+export async function importAgentConfigBackup(
+  config: PortableAgentConfig,
+  overwrite = false,
+): Promise<AgentConfigBackup> {
+  return protectedJSON<AgentConfigBackup>(appPath("/api/agent-config/import"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ config, overwrite }),
   });
 }
 
