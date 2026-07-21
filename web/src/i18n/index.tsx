@@ -1,5 +1,5 @@
 import React from "react";
-import { getStoredString, removeStoredString, setStoredString } from "../services/storage";
+import { getStoredString, setStoredString } from "../services/storage";
 import { enUS } from "./locales/en-US";
 import { zhCN } from "./locales/zh-CN";
 import type { I18nContextValue, Locale, MessageKey, MessageParams, Messages } from "./types";
@@ -56,11 +56,7 @@ export function detectLocale(): Locale {
 }
 
 export function persistLocale(locale: Locale): void {
-  if (locale === "zh-CN") {
-    removeStoredString(LOCALE_STORAGE_KEY);
-  } else {
-    setStoredString(LOCALE_STORAGE_KEY, locale);
-  }
+  setStoredString(LOCALE_STORAGE_KEY, locale);
 }
 
 export function applyDocumentLocale(locale: Locale): void {
@@ -154,4 +150,3 @@ export function useI18n(): I18nContextValue {
   }
   return value;
 }
-
