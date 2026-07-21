@@ -10,7 +10,9 @@ import (
 	"syscall"
 )
 
-func startReplacementProcess(currentPID int, exe string, args []string, stdout, stderr io.Writer, pkgDir, dstBin, dstAgents, dstTaskTemplate, dstWeb string) error {
+var startReplacementProcess = startReplacementProcessImpl
+
+func startReplacementProcessImpl(currentPID int, exe string, args []string, stdout, stderr io.Writer, pkgDir, dstBin, dstAgents, dstTaskTemplate, dstWeb string) error {
 	argList := append([]string(nil), args...)
 	quotedArgs := make([]string, 0, len(argList))
 	for _, arg := range argList {

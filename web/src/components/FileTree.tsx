@@ -3223,52 +3223,13 @@ export function FileTree({
             </div>
           </div>
         ) : null}
-        <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) 38px", gap: "6px" }}>
-          <button
-            type="button"
-            onClick={() => { void refreshMindFSServiceStatus(); }}
-            disabled={mindfsServiceAction !== null}
-            title={t("fileTree.refreshServiceStatus")}
-            style={{
-              minWidth: 0,
-              minHeight: "36px",
-              border: "1px solid var(--border-color)",
-              background: "var(--panel-bg)",
-              color: "var(--text-primary)",
-              borderRadius: "8px",
-              padding: "8px 10px",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: "7px",
-              cursor: mindfsServiceAction !== null ? "wait" : "pointer",
-              fontSize: "11px",
-              fontWeight: 700,
-            }}
-          >
-            <span
-              aria-hidden="true"
-              style={{
-                width: "7px",
-                height: "7px",
-                borderRadius: "50%",
-                background: mindfsServiceRestarting
-                  ? "var(--accent-color)"
-                  : mindfsServiceStatus?.status === "running"
-                    ? "#22c55e"
-                    : "var(--text-secondary)",
-                flexShrink: 0,
-              }}
-            />
-            <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              {mindfsServiceLabel}
-            </span>
-            {mindfsServiceStatus?.version ? (
-              <span style={{ color: "var(--text-secondary)", fontWeight: 500, flexShrink: 0 }}>
-                {mindfsServiceStatus.version}
-              </span>
-            ) : null}
-          </button>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "36px minmax(0, 1fr) minmax(0, 1fr) 62px",
+            gap: "6px",
+          }}
+        >
           <button
             type="button"
             onClick={() => { void restartMindFS(); }}
@@ -3308,8 +3269,6 @@ export function FileTree({
               </svg>
             )}
           </button>
-        </div>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: "6px" }}>
           <button
             type="button"
             onClick={() => openAgentConfigFlow("backup")}
@@ -3358,6 +3317,47 @@ export function FileTree({
             <ConfigSwitchIcon />
             <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
               {t("fileTree.switchAgentConfig")}
+            </span>
+          </button>
+          <button
+            type="button"
+            onClick={() => { void refreshMindFSServiceStatus(); }}
+            disabled={mindfsServiceAction !== null}
+            aria-label={`${t("fileTree.refreshServiceStatus")}: ${mindfsServiceLabel}${mindfsServiceStatus?.version ? ` ${mindfsServiceStatus.version}` : ""}`}
+            title={`${mindfsServiceLabel}${mindfsServiceStatus?.version ? ` ${mindfsServiceStatus.version}` : ""}`}
+            style={{
+              minWidth: 0,
+              minHeight: "36px",
+              border: "1px solid var(--border-color)",
+              background: "var(--panel-bg)",
+              color: "var(--text-primary)",
+              borderRadius: "8px",
+              padding: "8px 6px",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: "5px",
+              cursor: mindfsServiceAction !== null ? "wait" : "pointer",
+              fontSize: "11px",
+              fontWeight: 700,
+            }}
+          >
+            <span
+              aria-hidden="true"
+              style={{
+                width: "7px",
+                height: "7px",
+                borderRadius: "50%",
+                background: mindfsServiceRestarting
+                  ? "var(--accent-color)"
+                  : mindfsServiceStatus?.status === "running"
+                    ? "#22c55e"
+                    : "var(--text-secondary)",
+                flexShrink: 0,
+              }}
+            />
+            <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {mindfsServiceStatus?.version || "--"}
             </span>
           </button>
         </div>

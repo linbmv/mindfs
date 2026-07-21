@@ -11,11 +11,13 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -157,6 +159,95 @@ func TestTriggerSafeUpdateWithoutScriptDoesNotFallBack(t *testing.T) {
 	}
 	if got := service.GetStatus().Status; got != "available" {
 		t.Fatalf("status = %q, want available", got)
+	}
+}
+
+func TestRunSafeUpdateRestartsInstalledBinaryAfterScriptSuccess(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "safe-update.sh")
+	markerPath := filepath.Join(dir, "script-ran")
+	script := "#!/bin/sh\nprintf '%s\n' \"$MINDFS_SAFE_UPDATE_EXECUTABLE\" >\"" + markerPath + "\"\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	var restartCalls int32
+	previousStartReplacementProcess := startReplacementProcess
+	startReplacementProcess = func(currentPID int, exe string, args []string, stdout, stderr io.Writer, pkgDir, dstBin, dstAgents, dstTaskTemplate, dstWeb string) error {
+		atomic.AddInt32(&restartCalls, 1)
+		if exe != "/opt/mindfs/bin/mindfs" {
+			t.Fatalf("restart exe = %q, want /opt/mindfs/bin/mindfs", exe)
+		}
+		if got, want := strings.Join(args, "\x00"), "-addr\x00127.0.0.1:57331\x00-foreground"; got != want {
+			t.Fatalf("restart args = %q, want %q", got, want)
+		}
+		if pkgDir != "" {
+			t.Fatalf("pkgDir = %q, want empty for safe update restart", pkgDir)
+		}
+		return nil
+	}
+	t.Cleanup(func() { startReplacementProcess = previousStartReplacementProcess })
+
+	service := &Service{
+		executable:       "/opt/mindfs/bin/mindfs",
+		args:             []string{"-addr", "127.0.0.1:57331", "-foreground"},
+		safeUpdateScript: scriptPath,
+		status: Status{
+			LatestVersion: "v1.2.3",
+			Status:        "installing",
+		},
+	}
+	service.runSafeUpdate(context.Background())
+
+	if got := atomic.LoadInt32(&restartCalls); got != 1 {
+		t.Fatalf("restart calls = %d, want 1", got)
+	}
+	if got := service.GetStatus().Status; got != "restarting" {
+		t.Fatalf("status = %q, want restarting", got)
+	}
+	payload, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(payload), "/opt/mindfs/bin/mindfs\n"; got != want {
+		t.Fatalf("script payload = %q, want %q", got, want)
+	}
+}
+
+func TestRunSafeUpdateFailureDoesNotRestartInstalledBinary(t *testing.T) {
+	dir := t.TempDir()
+	scriptPath := filepath.Join(dir, "safe-update.sh")
+	if err := os.WriteFile(scriptPath, []byte("#!/bin/sh\necho boom >&2\nexit 7\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	var restartCalls int32
+	previousStartReplacementProcess := startReplacementProcess
+	startReplacementProcess = func(int, string, []string, io.Writer, io.Writer, string, string, string, string, string) error {
+		atomic.AddInt32(&restartCalls, 1)
+		return errors.New("restart should not be called")
+	}
+	t.Cleanup(func() { startReplacementProcess = previousStartReplacementProcess })
+
+	service := &Service{
+		executable:       "/opt/mindfs/bin/mindfs",
+		safeUpdateScript: scriptPath,
+		status: Status{
+			LatestVersion: "v1.2.3",
+			Status:        "installing",
+		},
+	}
+	service.runSafeUpdate(context.Background())
+
+	if got := atomic.LoadInt32(&restartCalls); got != 0 {
+		t.Fatalf("restart calls = %d, want 0", got)
+	}
+	st := service.GetStatus()
+	if st.Status != "failed" {
+		t.Fatalf("status = %q, want failed", st.Status)
+	}
+	if !strings.Contains(st.Message, "boom") {
+		t.Fatalf("message = %q, want script failure output", st.Message)
 	}
 }
 
