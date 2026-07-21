@@ -183,7 +183,6 @@ type FileTreeProps = {
 type AgentConfigFlow = "backup" | "switch";
 type AgentConfigStep = "details" | "edit" | "confirm";
 type AgentConfigAddTab = "backup" | "api";
-type AgentConfigSwitchTab = "backup" | "api_provider";
 type AgentConfigSwitchSelection = { type: "backup" | "api_provider"; id: string };
 
 function isAgentConfigBackupConflict(error: unknown): boolean {
@@ -625,7 +624,6 @@ function AgentConfigPopover({
   agents,
   selectedAgent,
   addTab,
-  switchTab,
   backupName,
   fileSourcesBody,
   envBody,
@@ -642,7 +640,6 @@ function AgentConfigPopover({
   error,
   onChooseAgent,
   onAddTabChange,
-  onSwitchTabChange,
   onBackupNameChange,
   onFileSourcesChange,
   onEnvBodyChange,
@@ -669,7 +666,6 @@ function AgentConfigPopover({
   agents: AgentStatus[];
   selectedAgent: string;
   addTab: AgentConfigAddTab;
-  switchTab: AgentConfigSwitchTab;
   backupName: string;
   fileSourcesBody: string;
   envBody: string;
@@ -686,7 +682,6 @@ function AgentConfigPopover({
   error: string;
   onChooseAgent: (name: string) => void;
   onAddTabChange: (tab: AgentConfigAddTab) => void;
-  onSwitchTabChange: (tab: AgentConfigSwitchTab) => void;
   onBackupNameChange: (value: string) => void;
   onFileSourcesChange: (value: string) => void;
   onEnvBodyChange: (value: string) => void;
@@ -718,9 +713,7 @@ function AgentConfigPopover({
   const selectedAgentStatus = agents.find((item) => item.name === selectedAgent);
   const supportsAPIProvider = Boolean(selectedAgentStatus?.supports_api_provider_switch);
   const addTabs: AgentConfigAddTab[] = supportsAPIProvider ? ["backup", "api"] : ["backup"];
-  const switchTabs: AgentConfigSwitchTab[] = supportsAPIProvider ? ["backup", "api_provider"] : ["backup"];
   const effectiveAddTab: AgentConfigAddTab = supportsAPIProvider ? addTab : "backup";
-  const effectiveSwitchTab: AgentConfigSwitchTab = supportsAPIProvider ? switchTab : "backup";
   return (
     <div
       style={{
@@ -968,69 +961,42 @@ function AgentConfigPopover({
         </>
       ) : (
         <>
-          {switchTabs.length > 1 ? (
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" }}>
-              {switchTabs.map((tab) => {
-                const active = effectiveSwitchTab === tab;
-                return (
-                  <button
-                    key={tab}
-                    type="button"
-                    disabled={busy}
-                    onClick={() => onSwitchTabChange(tab)}
-                    style={{
-                      border: "1px solid var(--border-color)",
-                      background: active ? "var(--selection-bg)" : "transparent",
-                      color: active ? "var(--accent-color)" : "var(--text-primary)",
-                      borderRadius: "8px",
-                      padding: "7px 8px",
-                      fontSize: "12px",
-                      fontWeight: 700,
-                      cursor: busy ? "default" : "pointer",
-                    }}
-                  >
-                    {tab === "backup" ? t("agentConfig.backup") : t("agentConfig.apiProvider")}
-                  </button>
-                );
-              })}
-            </div>
-          ) : null}
-          {effectiveSwitchTab === "backup" ? (
-            <label
-              style={{
-                ...agentConfigSecondaryButtonStyle(busy),
-                display: "inline-flex",
-                alignItems: "center",
-                justifyContent: "center",
-                gap: "6px",
+          <label
+            style={{
+              ...agentConfigSecondaryButtonStyle(busy),
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: "6px",
+            }}
+          >
+            <UploadIcon />
+            {t("agentConfig.importConfig")}
+            <input
+              type="file"
+              accept="application/json,.json"
+              disabled={busy}
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                event.currentTarget.value = "";
+                if (file) {
+                  onImportFile(file);
+                }
               }}
-            >
-              <UploadIcon />
-              {t("agentConfig.importConfig")}
-              <input
-                type="file"
-                accept="application/json,.json"
-                disabled={busy}
-                onChange={(event) => {
-                  const file = event.target.files?.[0];
-                  event.currentTarget.value = "";
-                  if (file) {
-                    onImportFile(file);
-                  }
-                }}
-                style={{ display: "none" }}
-              />
-            </label>
-          ) : null}
-          <div style={{ display: "flex", flexDirection: "column", gap: "8px", maxHeight: "260px", overflow: "auto" }}>
+              style={{ display: "none" }}
+            />
+          </label>
+          <div style={{ display: "flex", flexDirection: "column", gap: "8px", maxHeight: "300px", overflow: "auto" }}>
             {busy ? (
               <div style={agentConfigHintStyle}>{t("agentConfig.loading")}</div>
             ) : backups.length === 0 && (supportsAPIProvider ? apiProviders.length === 0 : true) ? (
               <div style={agentConfigHintStyle}>{t("agentConfig.noSwitchableConfig")}</div>
-            ) : effectiveSwitchTab === "backup" ? (
-              backups.length === 0 ? (
-                <div style={agentConfigHintStyle}>{t("agentConfig.noBackups")}</div>
-              ) : backups.map((item) => {
+            ) : (
+              <>
+                <div style={agentConfigGroupLabelStyle}>{t("agentConfig.backup")}</div>
+                {backups.length === 0 ? (
+                  <div style={agentConfigHintStyle}>{t("agentConfig.noBackups")}</div>
+                ) : backups.map((item) => {
                 const selected = item.id === selectedBackupID;
                 return (
                   <div
@@ -1104,11 +1070,13 @@ function AgentConfigPopover({
                     </button>
                   </div>
                 );
-              })
-            ) : (
-	              apiProviders.length === 0 ? (
-	                <div style={agentConfigHintStyle}>{t("agentConfig.noAPIProviders")}</div>
-              ) : apiProviders.map((item) => {
+              })}
+                {supportsAPIProvider ? (
+                  <>
+                    <div style={agentConfigGroupLabelStyle}>{t("agentConfig.apiProvider")}</div>
+                    {apiProviders.length === 0 ? (
+                      <div style={agentConfigHintStyle}>{t("agentConfig.noAPIProviders")}</div>
+                    ) : apiProviders.map((item) => {
                 const selected = item.id === selectedAPIProviderID;
                 const summary = (item.modelFamilies || []).join(", ");
                 return (
@@ -1165,7 +1133,10 @@ function AgentConfigPopover({
                     </button>
                   </div>
                 );
-              })
+              })}
+                  </>
+                ) : null}
+              </>
             )}
           </div>
         </>
@@ -1399,6 +1370,14 @@ const agentConfigHintStyle: React.CSSProperties = {
   wordBreak: "break-word",
 };
 
+const agentConfigGroupLabelStyle: React.CSSProperties = {
+  fontSize: "11px",
+  fontWeight: 700,
+  color: "var(--text-secondary)",
+  padding: "2px 2px 0",
+  letterSpacing: "0.02em",
+};
+
 const agentConfigActionRowStyle: React.CSSProperties = {
   display: "grid",
   gridTemplateColumns: "1fr 1fr",
@@ -1539,7 +1518,6 @@ export function FileTree({
   const [agentConfigAgents, setAgentConfigAgents] = React.useState<AgentStatus[]>([]);
   const [agentConfigAgent, setAgentConfigAgent] = React.useState("");
   const [agentConfigAddTab, setAgentConfigAddTab] = React.useState<AgentConfigAddTab>("backup");
-  const [agentConfigSwitchTab, setAgentConfigSwitchTab] = React.useState<AgentConfigSwitchTab>("backup");
   const [agentConfigName, setAgentConfigName] = React.useState("");
   const [agentConfigFileSourcesBody, setAgentConfigFileSourcesBody] = React.useState("");
   const [agentConfigEnvBody, setAgentConfigEnvBody] = React.useState("");
@@ -1554,6 +1532,7 @@ export function FileTree({
   const [agentConfigSwitchSelection, setAgentConfigSwitchSelection] = React.useState<AgentConfigSwitchSelection | null>(null);
   const [agentConfigPreferredProviderIDs, setAgentConfigPreferredProviderIDs] = React.useState<string[]>([]);
   const [agentConfigConfirmMessage, setAgentConfigConfirmMessage] = React.useState("");
+  const [agentConfigDirty, setAgentConfigDirty] = React.useState(false);
   const [agentConfigBusy, setAgentConfigBusy] = React.useState(false);
   const [agentConfigError, setAgentConfigError] = React.useState("");
   const [agentLifecycleOpen, setAgentLifecycleOpen] = React.useState(false);
@@ -2002,7 +1981,6 @@ export function FileTree({
     setAgentConfigEdit(null);
     agentConfigAutoSelectPendingRef.current = false;
     setAgentConfigAddTab("backup");
-    setAgentConfigSwitchTab("backup");
     setAgentConfigName("");
     setAgentConfigFileSourcesBody("");
     setAgentConfigEnvBody("");
@@ -2016,6 +1994,7 @@ export function FileTree({
     setAgentConfigSwitchSelection(null);
     setAgentConfigPreferredProviderIDs([]);
     setAgentConfigConfirmMessage("");
+    setAgentConfigDirty(false);
     setAgentConfigError("");
     setIsMenuOpen(false);
     setAgentConfigBusy(true);
@@ -2079,7 +2058,6 @@ export function FileTree({
     setAgentConfigEdit(null);
     agentConfigAutoSelectPendingRef.current = false;
     setAgentConfigAddTab("backup");
-    setAgentConfigSwitchTab("api_provider");
     setAgentConfigName("");
     setAgentConfigFileSourcesBody("");
     setAgentConfigEnvBody("");
@@ -2093,6 +2071,7 @@ export function FileTree({
     setAgentConfigSwitchSelection(null);
     setAgentConfigPreferredProviderIDs(providerIDs);
     setAgentConfigConfirmMessage("");
+    setAgentConfigDirty(false);
     setAgentConfigError("");
     setIsMenuOpen(false);
     setAgentConfigBusy(true);
@@ -2113,8 +2092,17 @@ export function FileTree({
     setAgentConfigError("");
     setAgentConfigConfirmMessage("");
     setAgentConfigSwitchSelection(null);
-    setAgentConfigSwitchTab("backup");
+    setAgentConfigDirty(false);
   }, []);
+
+  // Cancel paths (ESC, outside click, close button) go through this guard so
+  // unsaved form or profile edits are never dropped silently.
+  const requestCloseAgentConfigFlow = React.useCallback(() => {
+    if (agentConfigDirty && !window.confirm(t("agentConfig.discardUnsavedConfirm"))) {
+      return;
+    }
+    closeAgentConfigFlow();
+  }, [agentConfigDirty, closeAgentConfigFlow, t]);
 
   const openAgentLifecycleFlow = React.useCallback(() => {
     setAgentConfigFlow(null);
@@ -2144,12 +2132,22 @@ export function FileTree({
     }
     const handlePointerDown = (event: MouseEvent) => {
       if (!agentConfigPopoverRef.current?.contains(event.target as Node)) {
-        closeAgentConfigFlow();
+        requestCloseAgentConfigFlow();
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.stopPropagation();
+        requestCloseAgentConfigFlow();
       }
     };
     document.addEventListener("mousedown", handlePointerDown);
-    return () => document.removeEventListener("mousedown", handlePointerDown);
-  }, [agentConfigFlow, closeAgentConfigFlow]);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [agentConfigFlow, requestCloseAgentConfigFlow]);
 
   React.useEffect(() => {
     if (!agentLifecycleOpen) {
@@ -2208,6 +2206,7 @@ export function FileTree({
   const chooseAgentForConfig = React.useCallback(async (agentName: string) => {
     setAgentConfigAgent(agentName);
     setAgentConfigEdit(null);
+    setAgentConfigDirty(false);
     setAgentConfigError("");
     setAgentConfigBusy(true);
     try {
@@ -2254,10 +2253,6 @@ export function FileTree({
               ? { type: "backup", id: lastBackupID }
               : null,
         );
-        setAgentConfigSwitchTab(supportsAPIProvider && selectedAgent?.last_config_selection?.type === "api_provider" ? "api_provider" : "backup");
-        if (supportsAPIProvider && agentConfigPreferredProviderIDs.length > 0) {
-          setAgentConfigSwitchTab("api_provider");
-        }
         setAgentConfigStep("details");
       }
     } catch (error) {
@@ -2396,6 +2391,7 @@ export function FileTree({
     try {
       const config = await exportAgentConfigBackup(id);
       setAgentConfigEdit(config);
+      setAgentConfigDirty(false);
       setAgentConfigStep("edit");
     } catch (error) {
       setAgentConfigError(error instanceof Error ? error.message : t("agentConfig.exportFailed"));
@@ -2436,12 +2432,12 @@ export function FileTree({
     setAgentConfigAgent(agentName);
     setAgentConfigBackups(backups);
     setAgentAPIProviders(providers);
-    setAgentConfigSwitchTab("backup");
     setSelectedAgentConfigID(selectedID);
     setSelectedAgentAPIProviderID("");
     setAgentConfigSwitchSelection({ type: "backup", id: selectedID });
     setAgentConfigStep("details");
     setAgentConfigEdit(null);
+    setAgentConfigDirty(false);
     try {
       window.localStorage.setItem(AGENT_CONFIG_LAST_AGENT_STORAGE_KEY, agentName);
     } catch {
@@ -2491,11 +2487,17 @@ export function FileTree({
   }, [agentConfigEdit, refreshImportedAgentConfig, t]);
 
   const returnToAgentConfigDetails = React.useCallback(() => {
+    // Backing out of the profile editor drops its changes; the confirm step
+    // only returns to a still-populated form, so no warning is needed there.
+    if (agentConfigStep === "edit" && agentConfigDirty && !window.confirm(t("agentConfig.discardUnsavedConfirm"))) {
+      return;
+    }
     setAgentConfigStep("details");
     setAgentConfigEdit(null);
+    setAgentConfigDirty(false);
     setAgentConfigConfirmMessage("");
     setAgentConfigError("");
-  }, []);
+  }, [agentConfigDirty, agentConfigStep, t]);
 
   const deleteSelectedAgentConfigBackup = React.useCallback(async (id: string) => {
     const trimmedID = String(id || "").trim();
@@ -3375,7 +3377,6 @@ export function FileTree({
               agents={agentConfigAgents}
               selectedAgent={agentConfigAgent}
               addTab={agentConfigAddTab}
-              switchTab={agentConfigSwitchTab}
               backupName={agentConfigName}
               fileSourcesBody={agentConfigFileSourcesBody}
               envBody={agentConfigEnvBody}
@@ -3394,13 +3395,30 @@ export function FileTree({
                 void chooseAgentForConfig(name);
               }}
               onAddTabChange={setAgentConfigAddTab}
-              onSwitchTabChange={setAgentConfigSwitchTab}
-              onBackupNameChange={setAgentConfigName}
-              onFileSourcesChange={setAgentConfigFileSourcesBody}
-              onEnvBodyChange={setAgentConfigEnvBody}
-              onAPIProviderNameChange={setAgentAPIProviderName}
-              onAPIProviderBaseURLChange={setAgentAPIProviderBaseURL}
-              onAPIProviderAPIKeyChange={setAgentAPIProviderAPIKey}
+              onBackupNameChange={(value) => {
+                setAgentConfigDirty(true);
+                setAgentConfigName(value);
+              }}
+              onFileSourcesChange={(value) => {
+                setAgentConfigDirty(true);
+                setAgentConfigFileSourcesBody(value);
+              }}
+              onEnvBodyChange={(value) => {
+                setAgentConfigDirty(true);
+                setAgentConfigEnvBody(value);
+              }}
+              onAPIProviderNameChange={(value) => {
+                setAgentConfigDirty(true);
+                setAgentAPIProviderName(value);
+              }}
+              onAPIProviderBaseURLChange={(value) => {
+                setAgentConfigDirty(true);
+                setAgentAPIProviderBaseURL(value);
+              }}
+              onAPIProviderAPIKeyChange={(value) => {
+                setAgentConfigDirty(true);
+                setAgentAPIProviderAPIKey(value);
+              }}
               onSelectedBackupChange={selectAgentConfigBackup}
               onSelectedAPIProviderChange={selectAgentAPIProvider}
               onDeleteBackup={(id) => {
@@ -3418,7 +3436,10 @@ export function FileTree({
               onImportFile={(file) => {
                 void importAgentConfigFile(file);
               }}
-              onEditConfigChange={setAgentConfigEdit}
+              onEditConfigChange={(config) => {
+                setAgentConfigDirty(true);
+                setAgentConfigEdit(config);
+              }}
               onSaveEdit={() => {
                 void saveEditedAgentConfig();
               }}
@@ -3440,7 +3461,7 @@ export function FileTree({
                 }
                 void runAgentConfigSwitch(true);
               }}
-              onCancel={closeAgentConfigFlow}
+              onCancel={requestCloseAgentConfigFlow}
             />
           </div>
         ) : null}
