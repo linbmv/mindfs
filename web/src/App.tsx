@@ -13741,6 +13741,13 @@ export function App({ onGoHome }: AppProps) {
               onNewSession={handleNewSession}
               onRequestFileContext={handleRequestFileContext}
               onClearFileContext={handleClearFileContext}
+              onOpenAgentConfigFlow={(flow, agentName) => {
+                setAgentConfigSwitchRequest({
+                  nonce: Date.now(),
+                  flow,
+                  agent: agentName,
+                });
+              }}
               onToggleLeftSidebar={() => setIsLeftOpen((v) => !v)}
               onToggleRightSidebar={() => setIsRightOpen((v) => !v)}
               sidebarsSwapped={sidebarsSwapped}

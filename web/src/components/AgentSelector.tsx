@@ -7,6 +7,14 @@ import React, {
 } from "react";
 import { AgentIcon } from "./AgentIcon";
 import type { AgentStatus } from "../services/agents";
+import {
+  fetchAgentAPIProviders,
+  fetchAgentConfigBackups,
+  switchAgentAPIProvider,
+  switchAgentConfig,
+  type AgentAPIProvider,
+  type AgentConfigBackup,
+} from "../services/agentConfig";
 import { useI18n } from "../i18n";
 
 type AgentSelectorProps = {
@@ -21,6 +29,7 @@ type AgentSelectorProps = {
   onEffortChange?: (effort?: string) => void;
   onFastServiceChange?: (fastService?: "" | "on" | "off") => void;
   onAgentRestart?: (agent: string) => void | Promise<void>;
+  onOpenConfigFlow?: (flow: "backup" | "switch", agent: string) => void;
   compact?: boolean;
   warnUnavailable?: boolean;
   menuPlacement?: "top" | "bottom";
@@ -121,6 +130,7 @@ export function AgentSelector({
   onEffortChange,
   onFastServiceChange,
   onAgentRestart,
+  onOpenConfigFlow,
   compact = false,
   warnUnavailable = false,
   menuPlacement = "top",
@@ -137,6 +147,11 @@ export function AgentSelector({
     useState(false);
   const [restartingAgent, setRestartingAgent] = useState<string | null>(null);
   const [menuBodyHeight, setMenuBodyHeight] = useState<number | null>(null);
+  const [configLoading, setConfigLoading] = useState(false);
+  const [configBackups, setConfigBackups] = useState<AgentConfigBackup[]>([]);
+  const [configProviders, setConfigProviders] = useState<AgentAPIProvider[]>([]);
+  const [configError, setConfigError] = useState("");
+  const [switchingConfigID, setSwitchingConfigID] = useState("");
   const dropdownRef = useRef<HTMLDivElement>(null);
   const agentColumnRef = useRef<HTMLDivElement>(null);
   const submenuAgentStatus = useMemo(
@@ -336,6 +351,80 @@ export function AgentSelector({
       setMenuBodyHeight(null);
     },
     [onModeChange],
+  );
+
+  useEffect(() => {
+    if (!isOpen || !submenuAgentStatus) {
+      setConfigBackups([]);
+      setConfigProviders([]);
+      setConfigError("");
+      return;
+    }
+    let cancelled = false;
+    setConfigLoading(true);
+    setConfigError("");
+    const supportsProviders = !!submenuAgentStatus.supports_api_provider_switch;
+    Promise.all([
+      fetchAgentConfigBackups(submenuAgentStatus.name),
+      supportsProviders
+        ? fetchAgentAPIProviders(submenuAgentStatus.name)
+        : Promise.resolve([] as AgentAPIProvider[]),
+    ])
+      .then(([backups, providers]) => {
+        if (!cancelled) {
+          setConfigBackups(backups);
+          setConfigProviders(providers);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setConfigError(
+            error instanceof Error ? error.message : t("agentConfig.loadConfigFailed"),
+          );
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setConfigLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, submenuAgentStatus, t]);
+
+  const handleConfigSwitch = useCallback(
+    async (selection: { type: "backup" | "api_provider"; id: string }) => {
+      if (!submenuAgentStatus || switchingConfigID) {
+        return;
+      }
+      setSwitchingConfigID(selection.id);
+      setConfigError("");
+      try {
+        if (selection.type === "api_provider") {
+          await switchAgentAPIProvider({
+            agent: submenuAgentStatus.name,
+            providerID: selection.id,
+          });
+        } else {
+          const result = await switchAgentConfig({ id: selection.id });
+          if (result.needs_confirm) {
+            // Overwrite confirmations need the full FileTree panel; hand off.
+            onOpenConfigFlow?.("switch", submenuAgentStatus.name);
+            return;
+          }
+        }
+        setIsOpen(false);
+        setSubmenuAgent(null);
+      } catch (error) {
+        setConfigError(
+          error instanceof Error ? error.message : t("agentConfig.switchFailed"),
+        );
+      } finally {
+        setSwitchingConfigID("");
+      }
+    },
+    [onOpenConfigFlow, submenuAgentStatus, switchingConfigID, t],
   );
 
   const handleAgentRestart = useCallback(
@@ -643,6 +732,227 @@ export function AgentSelector({
                 </div>
               );
             })}
+          </div>
+
+          <div
+            style={{
+              width: submenuAgentStatus ? "fit-content" : "0",
+              minWidth: "0",
+              maxWidth: submenuAgentStatus ? "min(34vw, 168px)" : "0",
+              borderLeft: submenuAgentStatus
+                ? "1px solid var(--menu-divider)"
+                : "none",
+              height: menuBodyHeight ? `${menuBodyHeight}px` : "auto",
+              maxHeight: `${AGENT_MENU_MAX_BODY_HEIGHT}px`,
+              overflowY: "auto",
+              overflowX: "hidden",
+              transition: "width 0.16s ease, border-left-color 0.16s ease",
+              boxSizing: "border-box",
+            }}
+          >
+            {submenuAgentStatus ? (
+              <div style={{ width: "100%", minWidth: 0, boxSizing: "border-box" }}>
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: "6px",
+                    padding: "6px 12px",
+                  }}
+                >
+                  <span
+                    style={{
+                      fontSize: "11px",
+                      fontWeight: 600,
+                      color: "var(--text-secondary)",
+                      textTransform: "uppercase",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {t("agent.configColumn")}
+                  </span>
+                  {onOpenConfigFlow ? (
+                    <button
+                      type="button"
+                      aria-label={t("agent.addConfig", { name: submenuAgentStatus.name })}
+                      title={t("agent.addConfig", { name: submenuAgentStatus.name })}
+                      onClick={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        onOpenConfigFlow("backup", submenuAgentStatus.name);
+                        setIsOpen(false);
+                        setSubmenuAgent(null);
+                      }}
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        width: "18px",
+                        height: "18px",
+                        borderRadius: "6px",
+                        border: "1px solid var(--menu-border)",
+                        background: "transparent",
+                        color: "var(--text-secondary)",
+                        fontSize: "13px",
+                        lineHeight: 1,
+                        cursor: "pointer",
+                        padding: 0,
+                        flex: "0 0 auto",
+                      }}
+                    >
+                      +
+                    </button>
+                  ) : null}
+                </div>
+                {configLoading ? (
+                  <div style={configColumnHintStyle}>{t("agentConfig.loading")}</div>
+                ) : configError ? (
+                  <div style={{ ...configColumnHintStyle, color: "#dc2626" }}>
+                    {configError}
+                  </div>
+                ) : configBackups.length === 0 && configProviders.length === 0 ? (
+                  <div style={configColumnHintStyle}>
+                    {t("agentConfig.noSwitchableConfig")}
+                  </div>
+                ) : (
+                  <>
+                    {configBackups.map((item) => {
+                      const active =
+                        submenuAgentStatus.last_config_selection?.type === "backup" &&
+                        submenuAgentStatus.last_config_selection?.id === item.id;
+                      return (
+                        <button
+                          key={item.id}
+                          type="button"
+                          disabled={!!switchingConfigID}
+                          title={t("agentConfig.switchConfig", { name: item.name })}
+                          onClick={() => {
+                            void handleConfigSwitch({ type: "backup", id: item.id });
+                          }}
+                          style={{
+                            ...sectionItemStyle(active),
+                            flexDirection: "row",
+                            alignItems: "center",
+                            gap: "6px",
+                            opacity: switchingConfigID && switchingConfigID !== item.id ? 0.55 : 1,
+                          }}
+                        >
+                          <span
+                            style={{
+                              minWidth: 0,
+                              flex: 1,
+                              fontSize: "12px",
+                              fontWeight: 500,
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                              whiteSpace: "nowrap",
+                            }}
+                          >
+                            {item.name}
+                          </span>
+                          {switchingConfigID === item.id ? (
+                            <span
+                              aria-hidden="true"
+                              style={{
+                                width: "11px",
+                                height: "11px",
+                                borderRadius: "50%",
+                                border: "2px solid currentColor",
+                                borderRightColor: "transparent",
+                                animation: "agent-refresh-spin 0.9s linear infinite",
+                                flexShrink: 0,
+                              }}
+                            />
+                          ) : null}
+                        </button>
+                      );
+                    })}
+                    {configProviders.map((item) => {
+                      const active =
+                        submenuAgentStatus.last_config_selection?.type === "api_provider" &&
+                        submenuAgentStatus.last_config_selection?.id === item.id;
+                      return (
+                        <button
+                          key={item.id}
+                          type="button"
+                          disabled={!!switchingConfigID}
+                          title={t("agentConfig.switchConfig", { name: item.name })}
+                          onClick={() => {
+                            void handleConfigSwitch({ type: "api_provider", id: item.id });
+                          }}
+                          style={{
+                            ...sectionItemStyle(active),
+                            flexDirection: "row",
+                            alignItems: "center",
+                            gap: "6px",
+                            opacity: switchingConfigID && switchingConfigID !== item.id ? 0.55 : 1,
+                          }}
+                        >
+                          <span
+                            style={{
+                              minWidth: 0,
+                              flex: 1,
+                              fontSize: "12px",
+                              fontWeight: 500,
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                              whiteSpace: "nowrap",
+                            }}
+                          >
+                            {item.name}
+                          </span>
+                          <span
+                            style={{
+                              fontSize: "10px",
+                              color: "var(--text-secondary)",
+                              flexShrink: 0,
+                            }}
+                          >
+                            API
+                          </span>
+                          {switchingConfigID === item.id ? (
+                            <span
+                              aria-hidden="true"
+                              style={{
+                                width: "11px",
+                                height: "11px",
+                                borderRadius: "50%",
+                                border: "2px solid currentColor",
+                                borderRightColor: "transparent",
+                                animation: "agent-refresh-spin 0.9s linear infinite",
+                                flexShrink: 0,
+                              }}
+                            />
+                          ) : null}
+                        </button>
+                      );
+                    })}
+                    {onOpenConfigFlow ? (
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          onOpenConfigFlow("switch", submenuAgentStatus.name);
+                          setIsOpen(false);
+                          setSubmenuAgent(null);
+                        }}
+                        style={{
+                          ...sectionItemStyle(false, true),
+                          flexDirection: "row",
+                          alignItems: "center",
+                        }}
+                      >
+                        <span style={{ fontSize: "11px", color: "var(--text-secondary)" }}>
+                          {t("agent.manageConfigs")}
+                        </span>
+                      </button>
+                    ) : null}
+                  </>
+                )}
+              </div>
+            ) : null}
           </div>
 
           <div
@@ -1092,6 +1402,15 @@ function SelectorChevron({ expanded }: { expanded: boolean }) {
     </svg>
   );
 }
+
+const configColumnHintStyle: React.CSSProperties = {
+  padding: "8px 12px",
+  fontSize: "11px",
+  color: "var(--text-secondary)",
+  lineHeight: 1.5,
+  whiteSpace: "normal",
+  overflowWrap: "anywhere",
+};
 
 function sectionItemStyle(
   selected: boolean,

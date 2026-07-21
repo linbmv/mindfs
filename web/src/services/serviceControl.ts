@@ -1,4 +1,4 @@
-import { protectedJSON } from "./api";
+import { protectedFetch, protectedJSON } from "./api";
 import { appURL } from "./base";
 
 export type MindFSServiceStatus = {
@@ -32,4 +32,26 @@ export async function waitForMindFSService(timeoutMs = 20_000): Promise<boolean>
     }
   }
   return false;
+}
+
+// Downloads a tar.gz archive of all channel configuration (config profiles,
+// profile env values, API providers, agents.json) via the browser save dialog.
+// The archive contains API keys and auth tokens — treat it like a password file.
+export async function downloadConfigBackup(): Promise<void> {
+  const response = await protectedFetch(appURL("/api/config-backup/download"));
+  if (!response.ok) {
+    throw new Error(`backup download failed: ${response.status}`);
+  }
+  const disposition = response.headers.get("Content-Disposition") || "";
+  const match = disposition.match(/filename="?([^";]+)"?/);
+  const filename = match?.[1] || "mindfs-config-backup.tar.gz";
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
 }

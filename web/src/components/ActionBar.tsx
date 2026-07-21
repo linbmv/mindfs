@@ -3,6 +3,13 @@ import { type SessionMode } from "./ModeSelector";
 import { ModeSelector } from "./ModeSelector";
 import { AgentSelector } from "./AgentSelector";
 import { fetchAgents, fetchShells, restartAgent, type AgentStatus, type ShellStatus } from "../services/agents";
+import {
+  downloadConfigBackup,
+  fetchMindFSServiceStatus,
+  restartMindFSService,
+  waitForMindFSService,
+  type MindFSServiceStatus,
+} from "../services/serviceControl";
 import { fetchCandidates, type CandidateItem } from "../services/candidates";
 import { reportError } from "../services/error";
 import { isUploadAbortError, uploadFiles, type UploadProgress } from "../services/upload";
@@ -104,6 +111,7 @@ type ActionBarProps = {
   onNewSession?: () => void;
   onRequestFileContext?: () => void;
   onClearFileContext?: () => void;
+  onOpenAgentConfigFlow?: (flow: "backup" | "switch", agent: string) => void;
   onSessionClick?: () => void;
   onToggleLeftSidebar?: () => void;
   onToggleRightSidebar?: () => void;
@@ -407,6 +415,7 @@ export function ActionBar({
   onNewSession,
   onRequestFileContext,
   onClearFileContext,
+  onOpenAgentConfigFlow,
   onSessionClick,
   onToggleLeftSidebar,
   onToggleRightSidebar,
@@ -457,6 +466,11 @@ export function ActionBar({
   const { isMobile } = useResponsive();
   const isConnected = status === "connected";
   const connectionMeta = wsStatusMeta(status, t);
+  const [servicePanelOpen, setServicePanelOpen] = useState(false);
+  const [serviceStatus, setServiceStatus] = useState<MindFSServiceStatus | null>(null);
+  const [serviceBusy, setServiceBusy] = useState<"restart" | "backup" | null>(null);
+  const [serviceError, setServiceError] = useState("");
+  const servicePanelRef = useRef<HTMLDivElement>(null);
   const DRAG_THRESHOLD = -40;
   const boundRingColor = detachedBoundSession ? "#f59e0b" : "#2563eb";
   const boundRingShadow = detachedBoundSession
@@ -1077,6 +1091,67 @@ export function ActionBar({
     syncedSessionSignatureRef.current = "";
   }, [agent, agents]);
 
+  const toggleServicePanel = useCallback(() => {
+    setServicePanelOpen((prev) => {
+      const next = !prev;
+      if (next) {
+        setServiceError("");
+        fetchMindFSServiceStatus()
+          .then(setServiceStatus)
+          .catch(() => setServiceError(t("action.service.statusFailed")));
+      }
+      return next;
+    });
+  }, [t]);
+
+  const handleServiceRestart = useCallback(async () => {
+    if (serviceBusy || !window.confirm(t("fileTree.restartServiceConfirm"))) {
+      return;
+    }
+    setServiceBusy("restart");
+    setServiceError("");
+    try {
+      await restartMindFSService();
+      if (await waitForMindFSService()) {
+        window.location.reload();
+        return;
+      }
+      setServiceError(t("fileTree.serviceRestartTimeout"));
+    } catch (error) {
+      setServiceError(error instanceof Error ? error.message : t("fileTree.serviceRestartFailed"));
+    } finally {
+      setServiceBusy(null);
+    }
+  }, [serviceBusy, t]);
+
+  const handleConfigBackup = useCallback(async () => {
+    if (serviceBusy) {
+      return;
+    }
+    setServiceBusy("backup");
+    setServiceError("");
+    try {
+      await downloadConfigBackup();
+    } catch {
+      setServiceError(t("action.service.backupFailed"));
+    } finally {
+      setServiceBusy(null);
+    }
+  }, [serviceBusy, t]);
+
+  useEffect(() => {
+    if (!servicePanelOpen) {
+      return;
+    }
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!servicePanelRef.current?.contains(event.target as Node)) {
+        setServicePanelOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => document.removeEventListener("pointerdown", handlePointerDown);
+  }, [servicePanelOpen]);
+
   const handleDragStart = (e: React.MouseEvent | React.TouchEvent) => {
     const clientX = "touches" in e ? e.touches[0].clientX : e.clientX;
     dragStartRef.current = clientX;
@@ -1530,22 +1605,127 @@ export function ActionBar({
               </div>
             ) : null}
 
-            <span
-              aria-label={connectionMeta.label}
-              title={connectionMeta.label}
+            <div
+              ref={servicePanelRef}
               style={{
                 position: "absolute",
-                left: "5px",
-                bottom: "4px",
-                width: "6px",
-                height: "6px",
-                borderRadius: "50%",
-                background: connectionMeta.color,
-                boxShadow: connectionMeta.shadow,
-                pointerEvents: "auto",
+                left: "0",
+                bottom: "0",
                 zIndex: 6,
               }}
-            />
+            >
+              <button
+                type="button"
+                aria-label={connectionMeta.label}
+                title={connectionMeta.label}
+                onClick={toggleServicePanel}
+                style={{
+                  width: "20px",
+                  height: "20px",
+                  padding: 0,
+                  border: "none",
+                  background: "transparent",
+                  cursor: "pointer",
+                  display: "inline-flex",
+                  alignItems: "flex-end",
+                  justifyContent: "flex-start",
+                }}
+              >
+                <span
+                  style={{
+                    marginLeft: "5px",
+                    marginBottom: "4px",
+                    width: "6px",
+                    height: "6px",
+                    borderRadius: "50%",
+                    background: connectionMeta.color,
+                    boxShadow: connectionMeta.shadow,
+                  }}
+                />
+              </button>
+              {servicePanelOpen ? (
+                <div
+                  style={{
+                    position: "absolute",
+                    left: "2px",
+                    bottom: "calc(100% + 6px)",
+                    width: "228px",
+                    padding: "10px",
+                    borderRadius: "12px",
+                    border: "1px solid var(--menu-border)",
+                    background: "var(--menu-bg)",
+                    boxShadow: "0 8px 32px rgba(0,0,0,0.18)",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: "8px",
+                    zIndex: 1000,
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                    <span
+                      style={{
+                        width: "8px",
+                        height: "8px",
+                        borderRadius: "50%",
+                        background: connectionMeta.color,
+                        flexShrink: 0,
+                      }}
+                    />
+                    <span style={{ fontSize: "12px", fontWeight: 600, color: "var(--text-primary)", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {connectionMeta.label}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: "11px", color: "var(--text-secondary)", display: "flex", justifyContent: "space-between", gap: "8px" }}>
+                    <span>{t("action.service.title")}</span>
+                    <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {serviceStatus?.version ? `${t("action.service.version")} ${serviceStatus.version}` : serviceStatus?.status || "..."}
+                    </span>
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" }}>
+                    <button
+                      type="button"
+                      disabled={serviceBusy !== null}
+                      onClick={() => { void handleServiceRestart(); }}
+                      style={{
+                        border: "1px solid var(--menu-border)",
+                        background: "transparent",
+                        color: "var(--text-primary)",
+                        borderRadius: "8px",
+                        padding: "6px 8px",
+                        fontSize: "12px",
+                        fontWeight: 600,
+                        cursor: serviceBusy ? "default" : "pointer",
+                        opacity: serviceBusy === "restart" ? 0.6 : 1,
+                      }}
+                    >
+                      {serviceBusy === "restart" ? t("action.service.restarting") : t("action.service.restart")}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={serviceBusy !== null}
+                      title={t("action.service.backupHint")}
+                      onClick={() => { void handleConfigBackup(); }}
+                      style={{
+                        border: "1px solid var(--menu-border)",
+                        background: "transparent",
+                        color: "var(--text-primary)",
+                        borderRadius: "8px",
+                        padding: "6px 8px",
+                        fontSize: "12px",
+                        fontWeight: 600,
+                        cursor: serviceBusy ? "default" : "pointer",
+                        opacity: serviceBusy === "backup" ? 0.6 : 1,
+                      }}
+                    >
+                      {t("action.service.backup")}
+                    </button>
+                  </div>
+                  {serviceError ? (
+                    <div style={{ fontSize: "11px", color: "#dc2626", wordBreak: "break-word" }}>{serviceError}</div>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
 
             <div style={{ position: "absolute", right: isMobile ? "4px" : "8px", bottom: isMultiLine ? "6px" : "50%", transform: isMultiLine ? "none" : "translateY(50%)", display: "flex", alignItems: "center", gap: isMobile ? "0px" : "2px", zIndex: 5, transition: "all 0.2s cubic-bezier(0.4, 0, 0.2, 1)" }}>
               <div
@@ -1652,6 +1832,7 @@ export function ActionBar({
                       const items = await fetchAgents(true);
                       setAgents(items);
                     }}
+                    onOpenConfigFlow={onOpenAgentConfigFlow}
                     compact={true}
                     warnUnavailable={isSelectedAgentUnavailable}
                   />

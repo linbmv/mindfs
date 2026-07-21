@@ -373,6 +373,7 @@ func (h *HTTPHandler) Routes() http.Handler {
 	r.Delete("/api/agent-config/backups", h.protectedEndpoint(h.handleAgentConfigBackupDelete))
 	r.Get("/api/agent-config/export", h.protectedEndpoint(h.handleAgentConfigExport))
 	r.Post("/api/agent-config/import", h.protectedEndpoint(h.handleAgentConfigImport))
+	r.Get("/api/config-backup/download", h.protectedEndpoint(h.handleConfigBackupDownload))
 	r.Post("/api/agent-config/switch", h.protectedEndpoint(h.handleAgentConfigSwitch))
 	r.Get("/api/agent-api-providers", h.protectedEndpoint(h.handleAgentAPIProvidersList))
 	r.Post("/api/agent-api-providers", h.protectedEndpoint(h.handleAgentAPIProviderCreate))
