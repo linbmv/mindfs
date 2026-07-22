@@ -409,9 +409,13 @@ export function AgentSelector({
         } else {
           const result = await switchAgentConfig({ id: selection.id });
           if (result.needs_confirm) {
-            // Overwrite confirmations need the full FileTree panel; hand off.
-            onOpenConfigFlow?.("switch", submenuAgentStatus.name);
-            return;
+            // The target config file already exists (the normal case when
+            // switching profiles) — confirm the overwrite inline instead of
+            // bouncing the user to the full FileTree panel.
+            if (!window.confirm(result.message || t("agentConfig.targetExists"))) {
+              return;
+            }
+            await switchAgentConfig({ id: selection.id, confirmOverwrite: true });
           }
         }
         setIsOpen(false);
