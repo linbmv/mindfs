@@ -15,6 +15,7 @@ export type SessionItem = {
   parent_tool_call_id?: string;
   source?: string;
   task_id?: string;
+  working_dir?: string;
   agent?: string;
   shell?: string;
   name?: string;
@@ -1230,6 +1231,8 @@ function SessionCard({
   const forkSource = parseForkSessionSource(session.source);
   const isForkSession = !!forkSource;
   const storedName = session.name || `Session ${session.key.slice(0, 8)}`;
+  const workingDir = String(session.working_dir || ".").trim() || ".";
+  const workingDirLabel = workingDir === "." ? t("sessionList.projectRoot") : workingDir;
   const displayName = isForkSession
     ? forkSessionDisplayName(storedName, forkSource, sessionByKey, session.root_id)
     : storedName;
@@ -1546,6 +1549,22 @@ function SessionCard({
               {renderHighlightedText(displayName, highlightQuery, {
                 color: selected ? "var(--accent-color)" : "var(--text-primary)",
               })}
+            </span>
+            <span
+              title={t("sessionList.workingDir", { path: workingDirLabel })}
+              style={{
+                marginTop: "2px",
+                display: "block",
+                fontSize: "10px",
+                lineHeight: 1.35,
+                color: selected ? "var(--accent-color)" : "var(--text-secondary)",
+                opacity: 0.9,
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+              }}
+            >
+              {workingDirLabel}
             </span>
             {snippet ? (
               <span

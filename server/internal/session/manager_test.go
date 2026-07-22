@@ -232,6 +232,27 @@ func TestManagerPersistsParentSessionMetadata(t *testing.T) {
 	}
 }
 
+func TestManagerPersistsWorkingDirectory(t *testing.T) {
+	root := rootfs.NewRootInfo("mindfs", "mindfs", t.TempDir())
+	manager := NewManager(root)
+
+	created, err := manager.Create(context.Background(), CreateInput{
+		Type:       TypeChat,
+		WorkingDir: "services/api",
+		Name:       "API chat",
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	loaded, err := manager.Get(context.Background(), created.Key, 0)
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if loaded.WorkingDir != "services/api" {
+		t.Fatalf("WorkingDir = %q, want services/api", loaded.WorkingDir)
+	}
+}
+
 func TestManagerPersistsExchangeModelDisplayName(t *testing.T) {
 	root := rootfs.NewRootInfo("mindfs", "mindfs", t.TempDir())
 	manager := NewManager(root)

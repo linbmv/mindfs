@@ -20,6 +20,7 @@ type Session struct {
 	ParentToolCallID string           `json:"parent_tool_call_id,omitempty"`
 	Source           string           `json:"source,omitempty"`
 	TaskID           string           `json:"task_id,omitempty"`
+	WorkingDir       string           `json:"working_dir,omitempty"`
 	AgentCtxSeq      map[string]int   `json:"agent_ctx_seq,omitempty"`
 	Model            string           `json:"model,omitempty"`
 	Shell            string           `json:"shell,omitempty"`
@@ -242,6 +243,7 @@ type SearchHit struct {
 	Type             string     `json:"type"`
 	ParentSessionKey string     `json:"parent_session_key,omitempty"`
 	ParentToolCallID string     `json:"parent_tool_call_id,omitempty"`
+	WorkingDir       string     `json:"working_dir,omitempty"`
 	Agent            string     `json:"agent,omitempty"`
 	Model            string     `json:"model,omitempty"`
 	Shell            string     `json:"shell,omitempty"`

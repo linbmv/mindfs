@@ -306,6 +306,8 @@ export const enUS = {
   "sessionList.rename": "Rename",
   "sessionList.replying": "Replying",
   "sessionList.menu": "Session menu",
+  "sessionList.projectRoot": "Project root",
+  "sessionList.workingDir": "Working directory: {path}",
   "sessionList.searchCurrentProject": "Search current project sessions",
   "sessionList.noSearchMatch": "No matching sessions",
 

@@ -559,6 +559,7 @@ func (h *WSHandler) handleSessionMessage(ctx context.Context, conn *websocket.Co
 	agentMode := getString(req.Payload, "agent_mode")
 	effort := getString(req.Payload, "effort")
 	fastService := normalizeFastServiceValue(getString(req.Payload, "fast_service"))
+	workingDir := getString(req.Payload, "working_dir")
 	shell := getString(req.Payload, "shell")
 	terminalCols := getInt(req.Payload, "terminal_cols")
 	if content == "" || sessionType == "" || (agentName == "" && sessionType != session.TypeCommand) {
@@ -580,12 +581,13 @@ func (h *WSHandler) handleSessionMessage(ctx context.Context, conn *websocket.Co
 		created, err := uc.CreateSession(ctx, usecase.CreateSessionInput{
 			RootID: rootID,
 			Input: session.CreateInput{
-				Type:     sessionType,
-				Agent:    agentName,
-				Model:    model,
-				Shell:    shell,
-				PlanMode: planRequested,
-				Name:     sessionName,
+				Type:       sessionType,
+				WorkingDir: workingDir,
+				Agent:      agentName,
+				Model:      model,
+				Shell:      shell,
+				PlanMode:   planRequested,
+				Name:       sessionName,
 			},
 		})
 		if err != nil {

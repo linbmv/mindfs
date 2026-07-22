@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -90,6 +91,7 @@ type SessionSearchHit struct {
 	Type             string     `json:"type"`
 	ParentSessionKey string     `json:"parent_session_key,omitempty"`
 	ParentToolCallID string     `json:"parent_tool_call_id,omitempty"`
+	WorkingDir       string     `json:"working_dir,omitempty"`
 	Agent            string     `json:"agent,omitempty"`
 	Model            string     `json:"model,omitempty"`
 	Shell            string     `json:"shell,omitempty"`
@@ -303,6 +305,7 @@ func mapSessionSearchHits(rootID string, hits []session.SearchHit) []SessionSear
 			Type:             hit.Type,
 			ParentSessionKey: hit.ParentSessionKey,
 			ParentToolCallID: hit.ParentToolCallID,
+			WorkingDir:       hit.WorkingDir,
 			Agent:            hit.Agent,
 			Model:            hit.Model,
 			Shell:            hit.Shell,
@@ -368,9 +371,64 @@ type CreateSessionInput struct {
 	Input  session.CreateInput
 }
 
+func resolveSessionWorkingDir(root fs.RootInfo, value string) (string, string, error) {
+	workingDir := strings.TrimSpace(value)
+	if workingDir == "" {
+		workingDir = "."
+	}
+	normalized, err := root.NormalizePath(workingDir)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid session working directory %q: %w", workingDir, err)
+	}
+	normalized = filepath.ToSlash(filepath.Clean(filepath.FromSlash(normalized)))
+	if normalized == "" {
+		normalized = "."
+	}
+	rootAbs, err := root.RootDir()
+	if err != nil {
+		return "", "", err
+	}
+	rootAbs, err = filepath.Abs(rootAbs)
+	if err != nil {
+		return "", "", err
+	}
+	targetAbs := filepath.Join(rootAbs, filepath.FromSlash(normalized))
+	info, err := os.Stat(targetAbs)
+	if err != nil {
+		return "", "", fmt.Errorf("session working directory is unavailable: %s", normalized)
+	}
+	if !info.IsDir() {
+		return "", "", fmt.Errorf("session working directory is not a directory: %s", normalized)
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(rootAbs)
+	if err != nil {
+		return "", "", fmt.Errorf("resolve managed root: %w", err)
+	}
+	resolvedTarget, err := filepath.EvalSymlinks(targetAbs)
+	if err != nil {
+		return "", "", fmt.Errorf("resolve session working directory %q: %w", normalized, err)
+	}
+	rel, err := filepath.Rel(resolvedRoot, resolvedTarget)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", "", fmt.Errorf("session working directory escapes managed root: %s", normalized)
+	}
+	return normalized, resolvedTarget, nil
+}
+
 func (s *Service) CreateSession(ctx context.Context, in CreateSessionInput) (*session.Session, error) {
 	if err := s.ensureRegistry(); err != nil {
 		return nil, err
+	}
+	root, err := s.Registry.GetRoot(in.RootID)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(in.Input.WorkingDir) != "" {
+		workingDir, _, err := resolveSessionWorkingDir(root, in.Input.WorkingDir)
+		if err != nil {
+			return nil, err
+		}
+		in.Input.WorkingDir = workingDir
 	}
 	manager, err := s.Registry.GetSessionManager(in.RootID)
 	if err != nil {
@@ -467,6 +525,7 @@ func (s *Service) ForkSession(ctx context.Context, in ForkSessionInput) (ForkSes
 		Type:             session.TypeChat,
 		ParentSessionKey: current.Key,
 		Source:           string(sourceJSON),
+		WorkingDir:       current.WorkingDir,
 		Agent:            agentName,
 		Model:            resolveForkModel(current, target),
 		Name:             buildForkSessionName(current, target.Seq),
@@ -1970,6 +2029,12 @@ func (s *Service) SendMessage(ctx context.Context, in SendMessageInput) error {
 	rootAbs := managedRootAbs
 	if runtimeRootPath := strings.TrimSpace(in.RuntimeRootPath); runtimeRootPath != "" {
 		rootAbs = filepath.Clean(runtimeRootPath)
+	} else {
+		_, resolvedWorkingDir, resolveErr := resolveSessionWorkingDir(root, current.WorkingDir)
+		if resolveErr != nil {
+			return resolveErr
+		}
+		rootAbs = resolvedWorkingDir
 	}
 	planMode := current != nil && current.PlanMode
 	sess, agentCtxSeq, err := s.ensureAgentSession(turnCtx, agentPool, manager, current, in.Agent, in.Model, in.Mode, in.Effort, in.FastService, rootAbs)
@@ -2485,6 +2550,7 @@ func (r *claudeSubagentRouter) ensure(ctx context.Context, ref claudeSubagentRef
 		Type:             session.TypeChat,
 		ParentSessionKey: r.in.Parent.Key,
 		ParentToolCallID: parentToolCallID,
+		WorkingDir:       r.in.Parent.WorkingDir,
 		Agent:            r.in.Agent,
 		Model:            firstNonEmptyString(sourceModel(source), r.in.Model),
 		PlanMode:         false,
@@ -2715,6 +2781,7 @@ func (s *Service) ensureSubagentSession(ctx context.Context, in subagentSessionI
 		Type:             session.TypeChat,
 		ParentSessionKey: in.Parent.Key,
 		ParentToolCallID: in.ToolCall.CallID,
+		WorkingDir:       in.Parent.WorkingDir,
 		Agent:            in.Agent,
 		Model:            firstNonEmptyString(stringMeta(in.ToolCall.Meta, "model"), in.Model),
 		PlanMode:         false,

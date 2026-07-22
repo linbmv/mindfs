@@ -296,6 +296,7 @@ export type SessionItem = {
   shell?: string;
   source?: string;
   task_id?: string;
+  working_dir?: string;
   mode?: string;
   effort?: string;
   fast_service?: "" | "on" | "off";
@@ -445,6 +446,8 @@ function toSessionItem(
         : undefined,
     source: typeof session?.source === "string" ? session.source : undefined,
     task_id: typeof session?.task_id === "string" ? session.task_id : undefined,
+    working_dir:
+      typeof session?.working_dir === "string" ? session.working_dir : undefined,
     agent:
       typeof session?.agent === "string" && session.agent.trim()
         ? session.agent
@@ -532,6 +535,7 @@ type PendingSend = {
   effort?: string;
   fastService?: "" | "on" | "off";
   shell?: string;
+  workingDir?: string;
   message: string;
   timestamp: string;
   requestId?: string;
@@ -1205,6 +1209,18 @@ function buildDirectorySelectionKey(
   isRoot: boolean,
 ): string {
   return isRoot ? root : `${root}:${path}`;
+}
+
+function normalizeSessionWorkingDir(rootID: string, selected: string | null | undefined): string {
+  const value = String(selected || "").trim().replace(/\\/g, "/").replace(/^\.\//, "");
+  if (!value || value === "." || value === rootID) {
+    return ".";
+  }
+  const parts = value.split("/").filter((part) => part && part !== ".");
+  if (parts.some((part) => part === "..")) {
+    return ".";
+  }
+  return parts.join("/") || ".";
 }
 
 function loadLastRootId(): string {
@@ -5085,6 +5101,42 @@ export function App({ onGoHome }: AppProps) {
     [refreshTreeDir, t],
   );
 
+  const restoreSessionWorkingDirectory = useCallback(
+    (rootID: string, value: string | null | undefined) => {
+      const workingDir = normalizeSessionWorkingDir(rootID, value);
+      if (workingDir === ".") {
+        setSelectedDir(rootID);
+        setSelectedDirKey(buildDirectorySelectionKey(rootID, rootID, true));
+        setExpanded((prev) => Array.from(new Set([...prev, rootID])));
+        void refreshTreeDir(rootID, ".", false);
+        return;
+      }
+
+      const segments = workingDir.split("/").filter(Boolean);
+      const directoryChain = segments.map((_, index) =>
+        segments.slice(0, index + 1).join("/"),
+      );
+      setSelectedDir(workingDir);
+      setSelectedDirKey(buildDirectorySelectionKey(rootID, workingDir, false));
+      setExpanded((prev) =>
+        Array.from(
+          new Set([
+            ...prev,
+            rootID,
+            ...directoryChain.map((path) => `${rootID}:${path}`),
+          ]),
+        ),
+      );
+      void Promise.all([
+        refreshTreeDir(rootID, ".", false),
+        ...directoryChain
+          .slice(0, -1)
+          .map((path) => refreshTreeDir(rootID, path, false)),
+      ]);
+    },
+    [refreshTreeDir],
+  );
+
   const handleSelectSession = useCallback(
     async (session: any) => {
       const key = session?.key || session?.session_key;
@@ -5094,10 +5146,7 @@ export function App({ onGoHome }: AppProps) {
       if (currentRootIdRef.current !== targetRoot) {
         setCurrentRootId(targetRoot);
       }
-      setSelectedDir(targetRoot);
-      setSelectedDirKey(
-        buildDirectorySelectionKey(targetRoot, targetRoot, true),
-      );
+      restoreSessionWorkingDirectory(targetRoot, session?.working_dir);
       setMainViewPreferenceForRoot(targetRoot, "session");
       const currentDrawer = drawerSessionByRootRef.current[targetRoot];
       const preservePending =
@@ -5152,6 +5201,10 @@ export function App({ onGoHome }: AppProps) {
           key,
           pending,
         } as Session;
+        restoreSessionWorkingDirectory(
+          targetRoot,
+          (normalized as any).working_dir,
+        );
         if (shouldWriteCache) {
           sessionCacheRef.current[cacheKey] = normalized;
         }
@@ -5225,6 +5278,7 @@ export function App({ onGoHome }: AppProps) {
       setDrawerSessionForRoot,
       setMainViewPreferenceForRoot,
       replaceURLState,
+      restoreSessionWorkingDirectory,
     ],
   );
 
@@ -5899,6 +5953,9 @@ export function App({ onGoHome }: AppProps) {
             ] || ({ ...selected, key: selectedKey } as Session);
         }
       }
+      const workingDir = sendSessionKey
+        ? String((session as any)?.working_dir || "").trim() || undefined
+        : normalizeSessionWorkingDir(activeRoot, selectedDirRef.current);
       let effectiveMode = mode,
         effectiveAgent = agent,
         effectiveModel = model || "",
@@ -5991,6 +6048,7 @@ export function App({ onGoHome }: AppProps) {
           session = {
             key: tempKey,
             type: mode,
+            working_dir: workingDir,
             agent,
             model: effectiveModel,
             mode: effectiveAgentMode,
@@ -6187,6 +6245,7 @@ export function App({ onGoHome }: AppProps) {
         effort: effectiveEffort,
         fastService: effectiveFastService,
         shell: effectiveShell,
+        workingDir,
         message,
         timestamp: now,
         requestId,
@@ -6222,6 +6281,7 @@ export function App({ onGoHome }: AppProps) {
           effort: effectiveEffort,
           fastService: effectiveFastService,
           shell: effectiveShell,
+          workingDir,
           message,
           timestamp: now,
           requestId,
@@ -6315,6 +6375,7 @@ export function App({ onGoHome }: AppProps) {
         context,
         effectiveShell || undefined,
         requestId,
+        sendSessionKey ? undefined : workingDir,
       );
       if (sent && applyPendingPlanPrefix) {
         setPendingPlanMode(false);

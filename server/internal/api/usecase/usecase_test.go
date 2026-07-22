@@ -20,6 +20,28 @@ import (
 	"mindfs/server/internal/session"
 )
 
+func TestResolveSessionWorkingDirStaysInsideManagedRoot(t *testing.T) {
+	rootDir := t.TempDir()
+	root := rootfs.NewRootInfo("mindfs", "mindfs", rootDir)
+	if err := os.MkdirAll(filepath.Join(rootDir, "services", "api"), 0o755); err != nil {
+		t.Fatalf("mkdir working directory: %v", err)
+	}
+
+	normalized, resolved, err := resolveSessionWorkingDir(root, "services/api")
+	if err != nil {
+		t.Fatalf("resolve working directory: %v", err)
+	}
+	if normalized != "services/api" {
+		t.Fatalf("normalized working directory = %q", normalized)
+	}
+	if filepath.Clean(resolved) != filepath.Join(rootDir, "services", "api") {
+		t.Fatalf("resolved working directory = %q", resolved)
+	}
+	if _, _, err := resolveSessionWorkingDir(root, "../outside"); err == nil {
+		t.Fatal("expected path outside managed root to fail")
+	}
+}
+
 func TestSaveUploadedFilesDefaultsToAttachmentDirAndRenamesConflicts(t *testing.T) {
 	rootDir := t.TempDir()
 	root := rootfs.NewRootInfo("mindfs", "mindfs", rootDir)

@@ -32,7 +32,7 @@ const (
 	exchangeFileTpl  = "sessions/%s.jsonl"
 	auxFileTpl       = "sessions/%s.aux.jsonl"
 	selectSessionSQL = `
-	SELECT key, type, parent_session_key, parent_tool_call_id, source, task_id, model, shell, plan_mode, name, related_files_json, related_worktree_json, created_at, updated_at, closed_at
+	SELECT key, type, parent_session_key, parent_tool_call_id, source, task_id, working_dir, model, shell, plan_mode, name, related_files_json, related_worktree_json, created_at, updated_at, closed_at
 	FROM sessions`
 	deleteSessionSQL = `
 DELETE FROM sessions
@@ -42,14 +42,15 @@ DELETE FROM session_agent_bindings
 WHERE session_key = ?`
 	upsertSessionMetaSQL = `
 INSERT INTO sessions (
-		key, type, parent_session_key, parent_tool_call_id, source, task_id, model, shell, plan_mode, name, related_files_json, related_worktree_json, created_at, updated_at, closed_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		key, type, parent_session_key, parent_tool_call_id, source, task_id, working_dir, model, shell, plan_mode, name, related_files_json, related_worktree_json, created_at, updated_at, closed_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(key) DO UPDATE SET
 	type = excluded.type,
 	parent_session_key = excluded.parent_session_key,
 		parent_tool_call_id = excluded.parent_tool_call_id,
 		source = excluded.source,
 		task_id = excluded.task_id,
+		working_dir = excluded.working_dir,
 		model = excluded.model,
 		shell = excluded.shell,
 		plan_mode = excluded.plan_mode,
@@ -67,6 +68,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 	parent_tool_call_id TEXT NOT NULL DEFAULT '',
 	source TEXT NOT NULL DEFAULT '',
 	task_id TEXT NOT NULL DEFAULT '',
+	working_dir TEXT NOT NULL DEFAULT '',
 		model TEXT NOT NULL DEFAULT '',
 		shell TEXT NOT NULL DEFAULT '',
 		plan_mode INTEGER NOT NULL DEFAULT 0,
@@ -134,6 +136,7 @@ type CreateInput struct {
 	ParentToolCallID string
 	Source           string
 	TaskID           string
+	WorkingDir       string
 	Agent            string
 	Model            string
 	Shell            string
@@ -223,6 +226,7 @@ func (m *Manager) Create(_ context.Context, input CreateInput) (*Session, error)
 		ParentToolCallID: strings.TrimSpace(input.ParentToolCallID),
 		Source:           strings.TrimSpace(input.Source),
 		TaskID:           strings.TrimSpace(input.TaskID),
+		WorkingDir:       strings.TrimSpace(input.WorkingDir),
 		AgentCtxSeq:      agentCtxSeq,
 		Model:            strings.TrimSpace(input.Model),
 		Shell:            strings.TrimSpace(input.Shell),
@@ -1652,6 +1656,7 @@ func openSessionMetaDB(dbFile string) (db *sql.DB, err error) {
 		`ALTER TABLE sessions ADD COLUMN parent_tool_call_id TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE sessions ADD COLUMN source TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE sessions ADD COLUMN task_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE sessions ADD COLUMN working_dir TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE sessions ADD COLUMN related_worktree_json TEXT NOT NULL DEFAULT ''`,
 	} {
 		if _, err := db.Exec(stmt); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
@@ -1732,6 +1737,7 @@ func sessionMetaUpsertArgs(session *Session) ([]any, error) {
 		session.ParentToolCallID,
 		session.Source,
 		session.TaskID,
+		session.WorkingDir,
 		session.Model,
 		session.Shell,
 		boolToSQLiteInt(session.PlanMode),
@@ -1763,6 +1769,7 @@ func scanSessionMetaRow(scanner rowScanner) (*Session, error) {
 		parentToolCallID    string
 		source              string
 		taskID              string
+		workingDir          string
 		model               string
 		shell               string
 		planMode            int
@@ -1780,6 +1787,7 @@ func scanSessionMetaRow(scanner rowScanner) (*Session, error) {
 		&parentToolCallID,
 		&source,
 		&taskID,
+		&workingDir,
 		&model,
 		&shell,
 		&planMode,
@@ -1799,6 +1807,7 @@ func scanSessionMetaRow(scanner rowScanner) (*Session, error) {
 		ParentToolCallID: parentToolCallID,
 		Source:           source,
 		TaskID:           taskID,
+		WorkingDir:       workingDir,
 		Model:            model,
 		Shell:            shell,
 		PlanMode:         planMode != 0,
@@ -1868,6 +1877,7 @@ func normalizeSessionMeta(s *Session) {
 	s.ParentSessionKey = strings.TrimSpace(s.ParentSessionKey)
 	s.ParentToolCallID = strings.TrimSpace(s.ParentToolCallID)
 	s.Source = strings.TrimSpace(s.Source)
+	s.WorkingDir = strings.TrimSpace(filepath.ToSlash(s.WorkingDir))
 }
 
 func relatedFileIdentity(file RelatedFile) string {
@@ -1924,6 +1934,7 @@ func buildSearchHit(s *Session, matchType string, score, seq int, snippet string
 		Type:             s.Type,
 		ParentSessionKey: s.ParentSessionKey,
 		ParentToolCallID: s.ParentToolCallID,
+		WorkingDir:       s.WorkingDir,
 		Agent:            InferAgentFromSession(s),
 		Model:            s.Model,
 		Shell:            s.Shell,

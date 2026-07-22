@@ -304,6 +304,8 @@ export const zhCN = {
   "sessionList.rename": "重命名",
   "sessionList.replying": "正在回复",
   "sessionList.menu": "会话菜单",
+  "sessionList.projectRoot": "项目根目录",
+  "sessionList.workingDir": "工作目录：{path}",
   "sessionList.searchCurrentProject": "搜索当前项目会话",
   "sessionList.noSearchMatch": "未找到匹配会话",
 

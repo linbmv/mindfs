@@ -99,6 +99,7 @@ export type Session = {
   parent_tool_call_id?: string;
   source?: string;
   task_id?: string;
+  working_dir?: string;
   agent?: string;
   model?: string;
   shell?: string;
@@ -803,6 +804,7 @@ class SessionService {
     context?: Record<string, unknown>,
     shell?: string,
     requestId = this.createRequestId("msg"),
+    workingDir?: string,
   ): Promise<boolean> {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       console.warn("[session/send] blocked", {
@@ -828,6 +830,7 @@ class SessionService {
         effort,
         fast_service: fastService,
         shell,
+        working_dir: workingDir || undefined,
         terminal_cols: type === "command" ? estimateCommandTerminalCols() : undefined,
         context: this.compactContext(sessionKey, context),
       },
