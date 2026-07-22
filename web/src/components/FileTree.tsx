@@ -2061,15 +2061,20 @@ export function FileTree({
     };
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
+        event.preventDefault();
         event.stopPropagation();
+        event.stopImmediatePropagation();
         requestCloseAgentConfigFlow();
       }
     };
     document.addEventListener("mousedown", handlePointerDown);
-    document.addEventListener("keydown", handleKeyDown);
+    // Capture Escape before the ActionBar's global "cancel current turn"
+    // shortcut. The event remains consumed even when the user keeps editing
+    // after the unsaved-changes confirmation.
+    window.addEventListener("keydown", handleKeyDown, true);
     return () => {
       document.removeEventListener("mousedown", handlePointerDown);
-      document.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("keydown", handleKeyDown, true);
     };
   }, [agentConfigFlow, requestCloseAgentConfigFlow]);
 
