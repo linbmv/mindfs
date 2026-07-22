@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +12,32 @@ import (
 	"mindfs/server/internal/e2ee"
 	"mindfs/server/internal/relay"
 )
+
+func TestWriteProtectedBytes(t *testing.T) {
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i + 1)
+	}
+	want := []byte("mindfs configuration archive")
+	rec := httptest.NewRecorder()
+	if err := writeProtectedBytes(rec, http.StatusOK, key, want); err != nil {
+		t.Fatal(err)
+	}
+	if got := rec.Header().Get("X-MindFS-E2EE"); got != "1" {
+		t.Fatalf("e2ee header = %q, want 1", got)
+	}
+	var envelope e2ee.CipherEnvelope
+	if err := json.NewDecoder(rec.Body).Decode(&envelope); err != nil {
+		t.Fatal(err)
+	}
+	got, err := e2ee.DecryptBytes(key, &envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("decrypted payload = %q, want %q", got, want)
+	}
+}
 
 func TestPathForStaticAssetCleansURLPaths(t *testing.T) {
 	tests := []struct {

@@ -162,6 +162,56 @@ func TestTriggerSafeUpdateWithoutScriptDoesNotFallBack(t *testing.T) {
 	}
 }
 
+func TestRestartCurrentSchedulesReplacementWithCurrentArguments(t *testing.T) {
+	var restartCalls int32
+	previousStartReplacementProcess := startReplacementProcess
+	startReplacementProcess = func(currentPID int, exe string, args []string, stdout, stderr io.Writer, pkgDir, dstBin, dstAgents, dstTaskTemplate, dstWeb string) error {
+		atomic.AddInt32(&restartCalls, 1)
+		if currentPID != os.Getpid() {
+			t.Fatalf("restart PID = %d, want %d", currentPID, os.Getpid())
+		}
+		if exe != "/opt/mindfs/bin/mindfs" {
+			t.Fatalf("restart exe = %q, want /opt/mindfs/bin/mindfs", exe)
+		}
+		if got, want := strings.Join(args, "\x00"), "-addr\x00127.0.0.1:57331\x00-foreground\x00-agent-config\x00/tmp/agents.json"; got != want {
+			t.Fatalf("restart args = %q, want %q", got, want)
+		}
+		if pkgDir != "" {
+			t.Fatalf("pkgDir = %q, want empty", pkgDir)
+		}
+		return nil
+	}
+	previousScheduleCurrentProcessExit := scheduleCurrentProcessExit
+	exitScheduled := make(chan struct{}, 1)
+	scheduleCurrentProcessExit = func() {
+		exitScheduled <- struct{}{}
+	}
+	t.Cleanup(func() {
+		startReplacementProcess = previousStartReplacementProcess
+		scheduleCurrentProcessExit = previousScheduleCurrentProcessExit
+	})
+
+	service := &Service{
+		executable: "/opt/mindfs/bin/mindfs",
+		args:       []string{"-addr", "127.0.0.1:57331", "-foreground", "-agent-config", "/tmp/agents.json"},
+		status:     Status{Status: "idle"},
+	}
+	if err := service.RestartCurrent(); err != nil {
+		t.Fatalf("RestartCurrent() error = %v", err)
+	}
+	if got := atomic.LoadInt32(&restartCalls); got != 1 {
+		t.Fatalf("restart calls = %d, want 1", got)
+	}
+	if got := service.GetStatus().Status; got != "restarting" {
+		t.Fatalf("status = %q, want restarting", got)
+	}
+	select {
+	case <-exitScheduled:
+	case <-time.After(time.Second):
+		t.Fatal("current process exit was not scheduled")
+	}
+}
+
 func TestRunSafeUpdateRestartsInstalledBinaryAfterScriptSuccess(t *testing.T) {
 	dir := t.TempDir()
 	scriptPath := filepath.Join(dir, "safe-update.sh")
@@ -187,6 +237,9 @@ func TestRunSafeUpdateRestartsInstalledBinaryAfterScriptSuccess(t *testing.T) {
 		return nil
 	}
 	t.Cleanup(func() { startReplacementProcess = previousStartReplacementProcess })
+	previousScheduleCurrentProcessExit := scheduleCurrentProcessExit
+	scheduleCurrentProcessExit = func() {}
+	t.Cleanup(func() { scheduleCurrentProcessExit = previousScheduleCurrentProcessExit })
 
 	service := &Service{
 		executable:       "/opt/mindfs/bin/mindfs",

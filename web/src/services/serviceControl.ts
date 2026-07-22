@@ -1,5 +1,6 @@
 import { protectedFetch, protectedJSON } from "./api";
 import { appURL } from "./base";
+import { e2eeService } from "./e2ee";
 
 export type MindFSServiceStatus = {
   status: "running" | "restarting" | string;
@@ -17,18 +18,17 @@ export async function restartMindFSService(): Promise<MindFSServiceStatus> {
   });
 }
 
-export async function waitForMindFSService(timeoutMs = 20_000): Promise<boolean> {
+export async function waitForMindFSService(previousPID?: number, timeoutMs = 20_000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     await new Promise((resolve) => window.setTimeout(resolve, 500));
     try {
-      const response = await fetch(appURL("/health"), {
-        cache: "no-store",
-      });
-      if (response.ok) {
+      const status = await fetchMindFSServiceStatus();
+      if (status.status === "running" && (!previousPID || status.pid !== previousPID)) {
         return true;
       }
     } catch {
+      // A short connection failure is expected while the old process exits.
     }
   }
   return false;
@@ -40,12 +40,20 @@ export async function waitForMindFSService(timeoutMs = 20_000): Promise<boolean>
 export async function downloadConfigBackup(): Promise<void> {
   const response = await protectedFetch(appURL("/api/config-backup/download"));
   if (!response.ok) {
-    throw new Error(`backup download failed: ${response.status}`);
+    let payload: { message?: string; error?: string } = {};
+    try {
+      payload = await e2eeService.parseProtectedJSONResponse<{ message?: string; error?: string }>(response.clone());
+    } catch {
+      // Keep the HTTP status as the fallback when an error response is not JSON.
+    }
+    throw new Error(String(payload.message || payload.error || `backup download failed: ${response.status}`));
   }
   const disposition = response.headers.get("Content-Disposition") || "";
   const match = disposition.match(/filename="?([^";]+)"?/);
   const filename = match?.[1] || "mindfs-config-backup.tar.gz";
-  const blob = await response.blob();
+  const bytes = await e2eeService.parseProtectedBytesResponse(response);
+  const rawBuffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+  const blob = new Blob([rawBuffer], { type: "application/gzip" });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;

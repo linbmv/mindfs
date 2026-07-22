@@ -442,17 +442,6 @@ function ConfigArchiveIcon() {
   );
 }
 
-function ConfigSwitchIcon() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.1" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M7 7h11" />
-      <path d="m15 4 3 3-3 3" />
-      <path d="M17 17H6" />
-      <path d="m9 14-3 3 3 3" />
-    </svg>
-  );
-}
-
 function AgentInstallIcon() {
   return (
     <svg width="14" height="14" viewBox="0 0 48 48" fill="none" aria-hidden="true">
@@ -642,8 +631,6 @@ function AgentConfigPopover({
   onAPIProviderNameChange,
   onAPIProviderBaseURLChange,
   onAPIProviderAPIKeyChange,
-  onSelectedBackupChange,
-  onSelectedAPIProviderChange,
   onDeleteBackup,
   onDeleteAPIProvider,
   onEditBackup,
@@ -653,7 +640,6 @@ function AgentConfigPopover({
   onSaveEdit,
   onBackToDetails,
   onSave,
-  onSwitch,
   onConfirm,
   onCancel,
 }: {
@@ -684,8 +670,6 @@ function AgentConfigPopover({
   onAPIProviderNameChange: (value: string) => void;
   onAPIProviderBaseURLChange: (value: string) => void;
   onAPIProviderAPIKeyChange: (value: string) => void;
-  onSelectedBackupChange: (value: string) => void;
-  onSelectedAPIProviderChange: (value: string) => void;
   onDeleteBackup: (id: string) => void;
   onDeleteAPIProvider: (id: string) => void;
   onEditBackup: (id: string) => void;
@@ -695,7 +679,6 @@ function AgentConfigPopover({
   onSaveEdit: () => void;
   onBackToDetails: () => void;
   onSave: () => void;
-  onSwitch: (selection?: AgentConfigSwitchSelection) => void;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
@@ -1008,32 +991,22 @@ function AgentConfigPopover({
                       gap: "2px",
                     }}
                   >
-                    <button
-                      type="button"
-                      disabled={busy}
-                      title={t("agentConfig.switchConfig", { name: item.name })}
-                      onClick={() => {
-                        onSelectedBackupChange(item.id);
-                        onSwitch({ type: "backup", id: item.id });
-                      }}
+                    <div
                       style={{
                         minWidth: 0,
                         flex: 1,
-                        border: "none",
-                        background: "transparent",
                         color: "inherit",
                         padding: "5px 6px",
                         display: "flex",
                         alignItems: "center",
                         gap: "8px",
-                        cursor: busy ? "wait" : "pointer",
                         textAlign: "left",
                       }}
                     >
                       <AgentIcon agentName={item.agent} style={{ width: "14px", height: "14px", flexShrink: 0 }} />
                       <span style={{ minWidth: 0, flex: 1, fontSize: "12px", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.name}</span>
-                      <ConfigSwitchIcon />
-                    </button>
+                      {selected ? <span aria-label={t("agentConfig.currentConfig")} title={t("agentConfig.currentConfig")} style={{ fontSize: "11px" }}>✓</span> : null}
+                    </div>
                     <button
                       type="button"
                       aria-label={t("agentConfig.editConfig", { name: item.name })}
@@ -1089,25 +1062,15 @@ function AgentConfigPopover({
                       gap: "2px",
                     }}
                   >
-                    <button
-                      type="button"
-                      disabled={busy}
-                      title={t("agentConfig.switchConfig", { name: item.name })}
-                      onClick={() => {
-                        onSelectedAPIProviderChange(item.id);
-                        onSwitch({ type: "api_provider", id: item.id });
-                      }}
+                    <div
                       style={{
                         minWidth: 0,
                         flex: 1,
-                        border: "none",
-                        background: "transparent",
                         color: "inherit",
                         padding: "5px 6px",
                         display: "flex",
                         alignItems: "center",
                         gap: "8px",
-                        cursor: busy ? "wait" : "pointer",
                         textAlign: "left",
                       }}
                     >
@@ -1115,8 +1078,8 @@ function AgentConfigPopover({
                         <div style={{ fontSize: "12px", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.name}</div>
                         <div style={{ marginTop: "4px", fontSize: "11px", color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{summary}</div>
                       </div>
-                      <ConfigSwitchIcon />
-                    </button>
+                      {selected ? <span aria-label={t("agentConfig.currentConfig")} title={t("agentConfig.currentConfig")} style={{ fontSize: "11px" }}>✓</span> : null}
+                    </div>
                     <button
                       type="button"
                       aria-label={t("agentConfig.deleteAPIProvider", { name: item.name })}
@@ -2514,18 +2477,6 @@ export function FileTree({
     }
   }, [agentAPIProviders, selectedAgentAPIProviderID, t]);
 
-  const selectAgentConfigBackup = React.useCallback((id: string) => {
-    setSelectedAgentConfigID(id);
-    setSelectedAgentAPIProviderID("");
-    setAgentConfigSwitchSelection(id ? { type: "backup", id } : null);
-  }, []);
-
-  const selectAgentAPIProvider = React.useCallback((id: string) => {
-    setSelectedAgentAPIProviderID(id);
-    setSelectedAgentConfigID("");
-    setAgentConfigSwitchSelection(id ? { type: "api_provider", id } : null);
-  }, []);
-
   React.useEffect(() => {
     if (visibleRelayTips.length === 0) {
       setActiveRelayTipIndex(0);
@@ -3380,8 +3331,6 @@ export function FileTree({
                 setAgentConfigDirty(true);
                 setAgentAPIProviderAPIKey(value);
               }}
-              onSelectedBackupChange={selectAgentConfigBackup}
-              onSelectedAPIProviderChange={selectAgentAPIProvider}
               onDeleteBackup={(id) => {
                 void deleteSelectedAgentConfigBackup(id);
               }}
@@ -3411,9 +3360,6 @@ export function FileTree({
                   return;
                 }
                 void saveAgentConfigBackup();
-              }}
-              onSwitch={(selection) => {
-                void runAgentConfigSwitch(false, selection);
               }}
               onConfirm={() => {
                 if (agentConfigFlow === "backup") {

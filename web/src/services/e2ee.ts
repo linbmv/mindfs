@@ -261,6 +261,18 @@ class E2EEService {
     return this.decodeProtectedJSON<T>(await response.text());
   }
 
+  async parseProtectedBytesResponse(response: Response): Promise<Uint8Array> {
+    if (!this.isProtectedJSONResponse(response)) {
+      return new Uint8Array(await response.arrayBuffer());
+    }
+    const envelope = JSON.parse(await response.text()) as CipherEnvelope;
+    const session = await this.ensureSession();
+    if (!session) {
+      throw new Error("e2ee_required");
+    }
+    return decryptBytes(session.transportKey, envelope);
+  }
+
   async protectedFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
     if (!this.required) {
       return fetch(input, init);

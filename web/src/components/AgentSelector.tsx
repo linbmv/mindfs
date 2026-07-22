@@ -29,6 +29,7 @@ type AgentSelectorProps = {
   onEffortChange?: (effort?: string) => void;
   onFastServiceChange?: (fastService?: "" | "on" | "off") => void;
   onAgentRestart?: (agent: string) => void | Promise<void>;
+  // Config rows switch in place. These two flows only add or manage channels.
   onOpenConfigFlow?: (flow: "backup" | "switch", agent: string) => void;
   compact?: boolean;
   warnUnavailable?: boolean;
@@ -428,7 +429,7 @@ export function AgentSelector({
         setSwitchingConfigID("");
       }
     },
-    [onOpenConfigFlow, submenuAgentStatus, switchingConfigID, t],
+    [submenuAgentStatus, switchingConfigID, t],
   );
 
   const handleAgentRestart = useCallback(
@@ -776,38 +777,6 @@ export function AgentSelector({
                   >
                     {t("agent.configColumn")}
                   </span>
-                  {onOpenConfigFlow ? (
-                    <button
-                      type="button"
-                      aria-label={t("agent.addConfig", { name: submenuAgentStatus.name })}
-                      title={t("agent.addConfig", { name: submenuAgentStatus.name })}
-                      onClick={(event) => {
-                        event.preventDefault();
-                        event.stopPropagation();
-                        onOpenConfigFlow("backup", submenuAgentStatus.name);
-                        setIsOpen(false);
-                        setSubmenuAgent(null);
-                      }}
-                      style={{
-                        display: "inline-flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        width: "18px",
-                        height: "18px",
-                        borderRadius: "6px",
-                        border: "1px solid var(--menu-border)",
-                        background: "transparent",
-                        color: "var(--text-secondary)",
-                        fontSize: "13px",
-                        lineHeight: 1,
-                        cursor: "pointer",
-                        padding: 0,
-                        flex: "0 0 auto",
-                      }}
-                    >
-                      +
-                    </button>
-                  ) : null}
                 </div>
                 {configLoading ? (
                   <div style={configColumnHintStyle}>{t("agentConfig.loading")}</div>
@@ -932,29 +901,46 @@ export function AgentSelector({
                         </button>
                       );
                     })}
-                    {onOpenConfigFlow ? (
-                      <button
-                        type="button"
-                        onClick={(event) => {
-                          event.preventDefault();
-                          event.stopPropagation();
-                          onOpenConfigFlow("switch", submenuAgentStatus.name);
-                          setIsOpen(false);
-                          setSubmenuAgent(null);
-                        }}
-                        style={{
-                          ...sectionItemStyle(false, true),
-                          flexDirection: "row",
-                          alignItems: "center",
-                        }}
-                      >
-                        <span style={{ fontSize: "11px", color: "var(--text-secondary)" }}>
-                          {t("agent.manageConfigs")}
-                        </span>
-                      </button>
-                    ) : null}
                   </>
                 )}
+                {onOpenConfigFlow ? (
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "1fr 1fr",
+                      gap: "6px",
+                      padding: "8px",
+                      borderTop: "1px solid var(--menu-divider)",
+                    }}
+                  >
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        onOpenConfigFlow("backup", submenuAgentStatus.name);
+                        setIsOpen(false);
+                        setSubmenuAgent(null);
+                      }}
+                      style={configCommandButtonStyle}
+                    >
+                      {t("agent.addChannel")}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        onOpenConfigFlow("switch", submenuAgentStatus.name);
+                        setIsOpen(false);
+                        setSubmenuAgent(null);
+                      }}
+                      style={configCommandButtonStyle}
+                    >
+                      {t("agent.channelConfig")}
+                    </button>
+                  </div>
+                ) : null}
               </div>
             ) : null}
           </div>
@@ -1414,6 +1400,21 @@ const configColumnHintStyle: React.CSSProperties = {
   lineHeight: 1.5,
   whiteSpace: "normal",
   overflowWrap: "anywhere",
+};
+
+const configCommandButtonStyle: React.CSSProperties = {
+  minWidth: 0,
+  height: "28px",
+  border: "1px solid var(--menu-border)",
+  borderRadius: "6px",
+  background: "transparent",
+  color: "var(--text-primary)",
+  padding: "0 5px",
+  fontSize: "11px",
+  fontWeight: 600,
+  lineHeight: 1.2,
+  whiteSpace: "normal",
+  cursor: "pointer",
 };
 
 function sectionItemStyle(

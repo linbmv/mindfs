@@ -143,6 +143,23 @@ func writeProtectedJSON(w http.ResponseWriter, status int, key []byte, value any
 	return json.NewEncoder(w).Encode(envelope)
 }
 
+// writeProtectedBytes is the binary counterpart to writeProtectedJSON. Most
+// protected endpoints return JSON, but downloads (for example the complete
+// configuration archive) must retain their original bytes. The response is
+// wrapped in the same E2EE envelope so the browser can decrypt it before
+// creating a Blob, while Content-Disposition is preserved for the download
+// filename.
+func writeProtectedBytes(w http.ResponseWriter, status int, key, payload []byte) error {
+	envelope, err := e2ee.EncryptBytes(key, payload)
+	if err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(e2eeHeaderName, "1")
+	w.WriteHeader(status)
+	return json.NewEncoder(w).Encode(envelope)
+}
+
 func (w *protectedResponseWriter) Header() http.Header {
 	return w.ResponseWriter.Header()
 }
@@ -201,9 +218,18 @@ func (h *HTTPHandler) protectedEndpoint(next http.HandlerFunc) http.HandlerFunc 
 			w.WriteHeader(recorder.status)
 			return
 		}
+		contentType := strings.ToLower(strings.TrimSpace(recorder.Header().Get("Content-Type")))
+		if contentType != "" && !strings.HasPrefix(contentType, "application/json") {
+			if err := writeProtectedBytes(w, recorder.status, sess.Key, recorder.body.Bytes()); err != nil {
+				respondError(w, http.StatusServiceUnavailable, err)
+			}
+			return
+		}
 		var payload any
 		if err := json.Unmarshal(recorder.body.Bytes(), &payload); err != nil {
-			respondError(w, http.StatusServiceUnavailable, err)
+			if err := writeProtectedBytes(w, recorder.status, sess.Key, recorder.body.Bytes()); err != nil {
+				respondError(w, http.StatusServiceUnavailable, err)
+			}
 			return
 		}
 		if err := writeProtectedJSON(w, recorder.status, sess.Key, payload); err != nil {

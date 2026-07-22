@@ -1111,8 +1111,9 @@ export function ActionBar({
     setServiceBusy("restart");
     setServiceError("");
     try {
+      const previousPID = serviceStatus?.pid || (await fetchMindFSServiceStatus()).pid;
       await restartMindFSService();
-      if (await waitForMindFSService()) {
+      if (await waitForMindFSService(previousPID)) {
         window.location.reload();
         return;
       }
@@ -1122,7 +1123,7 @@ export function ActionBar({
     } finally {
       setServiceBusy(null);
     }
-  }, [serviceBusy, t]);
+  }, [serviceBusy, serviceStatus?.pid, t]);
 
   const handleConfigBackup = useCallback(async () => {
     if (serviceBusy) {

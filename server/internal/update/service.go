@@ -33,6 +33,11 @@ const (
 
 var releaseManifestPublicKey string
 
+var scheduleCurrentProcessExit = func() {
+	time.Sleep(500 * time.Millisecond)
+	os.Exit(0)
+}
+
 type Status struct {
 	CurrentVersion      string    `json:"current_version"`
 	LatestVersion       string    `json:"latest_version,omitempty"`
@@ -859,10 +864,7 @@ func (s *Service) restartInstalledBinary(pkgDir string) error {
 	if err := startReplacementProcess(os.Getpid(), exe, s.args, os.Stdout, os.Stderr, pkgDir, dstBin, dstAgents, dstTaskTemplate, dstWeb); err != nil {
 		return err
 	}
-	go func() {
-		time.Sleep(500 * time.Millisecond)
-		os.Exit(0)
-	}()
+	go scheduleCurrentProcessExit()
 	return nil
 }
 
