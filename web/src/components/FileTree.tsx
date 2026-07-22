@@ -132,6 +132,7 @@ type FileTreeProps = {
   onShowHiddenFilesChange?: (show: boolean) => void;
   onSelectFile?: (entry: FileEntry, rootId: string) => void;
   onSelectRoot?: (entry: FileEntry, rootId: string) => void;
+  onRemoveRoot?: (entry: FileEntry, rootId: string) => void;
   onToggleDir?: (entry: FileEntry, rootId: string) => void;
   renderRootExtraContent?: (rootId: string) => React.ReactNode;
   renderRootWorktreeContent?: (rootId: string) => React.ReactNode;
@@ -1398,6 +1399,7 @@ export function FileTree({
   onShowHiddenFilesChange,
   onSelectFile,
   onSelectRoot,
+  onRemoveRoot,
   onToggleDir,
   renderRootExtraContent,
   renderRootWorktreeContent,
@@ -2666,7 +2668,7 @@ export function FileTree({
         const shouldRenderChildren = projectTreeTab === "files" || !isManagedRootNode;
 
         return (
-          <li key={expandedKey}>
+          <li key={expandedKey} style={{ position: "relative" }}>
             <button
               type="button"
               onClick={handleEntryClick}
@@ -2676,6 +2678,7 @@ export function FileTree({
                 cursor: "pointer",
                 padding: "6px 8px",
                 paddingLeft: PROJECT_TREE_ROOT_PADDING_LEFT + depth * PROJECT_TREE_INDENT,
+                paddingRight: isManagedRootNode && onRemoveRoot ? "38px" : "8px",
                 display: "flex",
                 alignItems: "center",
                 gap: "4px",
@@ -2749,6 +2752,44 @@ export function FileTree({
                 </span>
               )}
             </button>
+            {isManagedRootNode && onRemoveRoot ? (
+              <button
+                type="button"
+                aria-label={t("fileTree.removeFromTree")}
+                title={t("fileTree.removeFromTreeHelp")}
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  onRemoveRoot(entry, entryRoot);
+                }}
+                style={{
+                  position: "absolute",
+                  top: 1,
+                  right: 2,
+                  width: "28px",
+                  height: "28px",
+                  padding: 0,
+                  border: "none",
+                  borderRadius: "6px",
+                  background: "transparent",
+                  color: "var(--text-secondary)",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  cursor: "pointer",
+                }}
+                onMouseEnter={(event) => {
+                  event.currentTarget.style.background = "rgba(220, 38, 38, 0.1)";
+                  event.currentTarget.style.color = "#dc2626";
+                }}
+                onMouseLeave={(event) => {
+                  event.currentTarget.style.background = "transparent";
+                  event.currentTarget.style.color = "var(--text-secondary)";
+                }}
+              >
+                <TrashIcon />
+              </button>
+            ) : null}
             {entry.is_dir && isOpen && shouldRenderChildren && children.length > 0 ? renderEntries(children, depth + 1, entryRoot) : null}
             {entry.is_dir && isOpen && rootExtraContent ? (
               <div style={{ padding: `2px 4px 8px ${PROJECT_TREE_INDENT}px` }}>

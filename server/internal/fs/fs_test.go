@@ -41,6 +41,39 @@ func TestRegistryUpsertRejectsSameNameDifferentPath(t *testing.T) {
 	}
 }
 
+func TestRegistryRemoveKeepsDirectoryAndFiles(t *testing.T) {
+	registry := NewRegistry(filepath.Join(t.TempDir(), "registry.json"))
+	projectDir := filepath.Join(t.TempDir(), "project")
+	if err := os.Mkdir(projectDir, 0o755); err != nil {
+		t.Fatalf("Mkdir project returned error: %v", err)
+	}
+	markerPath := filepath.Join(projectDir, "keep.txt")
+	if err := os.WriteFile(markerPath, []byte("keep me"), 0o644); err != nil {
+		t.Fatalf("WriteFile marker returned error: %v", err)
+	}
+	if _, err := registry.Upsert(projectDir); err != nil {
+		t.Fatalf("Upsert returned error: %v", err)
+	}
+
+	removed, err := registry.Remove(projectDir)
+	if err != nil {
+		t.Fatalf("Remove returned error: %v", err)
+	}
+	if removed.RootPath != projectDir {
+		t.Fatalf("removed RootPath = %q, want %q", removed.RootPath, projectDir)
+	}
+	if got := registry.List(); len(got) != 0 {
+		t.Fatalf("registry still contains %d roots, want 0", len(got))
+	}
+	payload, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatalf("removed managed directory data: %v", err)
+	}
+	if string(payload) != "keep me" {
+		t.Fatalf("marker content = %q, want %q", payload, "keep me")
+	}
+}
+
 func TestSharedFileWatcherResolveRelatedFileRecordPlainRoot(t *testing.T) {
 	rootDir := t.TempDir()
 	root := NewRootInfo("root", "plain-root", rootDir)

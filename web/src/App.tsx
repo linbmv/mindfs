@@ -8159,8 +8159,7 @@ export function App({ onGoHome }: AppProps) {
     </div>
   ) : null;
 
-  const handleRemoveCurrentRoot = useCallback(async () => {
-    const rootID = currentRootIdRef.current;
+  const handleRemoveRoot = useCallback(async (rootID: string) => {
     if (!rootID) {
       return;
     }
@@ -8189,6 +8188,13 @@ export function App({ onGoHome }: AppProps) {
       );
     }
   }, [clearRootScopedClientState, refreshManagedRoots, t]);
+
+  const handleRemoveCurrentRoot = useCallback(() => {
+    const rootID = currentRootIdRef.current;
+    if (rootID) {
+      void handleRemoveRoot(rootID);
+    }
+  }, [handleRemoveRoot]);
 
   const handleRemoveCurrentWorktree = useCallback(async () => {
     const rootID = currentRootIdRef.current;
@@ -13667,6 +13673,9 @@ export function App({ onGoHome }: AppProps) {
                 suppressTreeExpand: true,
               })
             }
+            onRemoveRoot={(_entry, rootID) => {
+              void handleRemoveRoot(rootID);
+            }}
             onToggleDir={(e, r) =>
               actionHandlers.open_dir({
                 path: e.path,

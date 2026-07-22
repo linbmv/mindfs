@@ -365,8 +365,7 @@ func (s *Service) UpdateFirstInput(ctx context.Context, in UpdateTaskInput) (Tas
 func (s *Service) Next(ctx context.Context, in MoveInput) (TaskDetail, error) {
 	detail, err := s.moveRelative(ctx, in, 1, "user_approved", StageStatusApproved)
 	if err == nil {
-		s.Schedule(in.RootID)
-		s.RunTask(detail.Task.RootID, detail.Task.ID)
+		s.dispatchTask(detail.Task)
 	}
 	return detail, err
 }
@@ -418,7 +417,7 @@ func (s *Service) RunNow(ctx context.Context, in MoveInput) (TaskDetail, error) 
 func (s *Service) Prev(ctx context.Context, in MoveInput) (TaskDetail, error) {
 	detail, err := s.moveRelative(ctx, in, -1, "user_rejected", StageStatusRejected)
 	if err == nil {
-		s.RunTask(detail.Task.RootID, detail.Task.ID)
+		s.dispatchTask(detail.Task)
 	}
 	return detail, err
 }
@@ -433,7 +432,7 @@ func (s *Service) Jump(ctx context.Context, in MoveInput) (TaskDetail, error) {
 	}
 	detail, err := s.moveTo(ctx, store, task, tmpl, in.StageIndex, "moved", "", in.Reason)
 	if err == nil {
-		s.RunTask(detail.Task.RootID, detail.Task.ID)
+		s.dispatchTask(detail.Task)
 	}
 	return detail, err
 }
@@ -457,10 +456,24 @@ func (s *Service) Resume(ctx context.Context, in MoveInput) (TaskDetail, error) 
 	}
 	detail, err := s.setTaskStatus(ctx, in.RootID, in.TaskID, status, "resumed", in.Reason, false)
 	if err == nil {
-		s.Schedule(in.RootID)
-		s.RunTask(detail.Task.RootID, detail.Task.ID)
+		s.dispatchTask(detail.Task)
 	}
 	return detail, err
+}
+
+// dispatchTask hands a moved or resumed task to exactly one execution path.
+// Queued tasks must be admitted by the scheduler first; tasks that were already
+// admitted can resume directly. Calling both paths for the same task races the
+// scheduler and can execute one stage twice.
+func (s *Service) dispatchTask(task Task) {
+	if s == nil {
+		return
+	}
+	if task.SchedulerAdmitted {
+		s.RunTask(task.RootID, task.ID)
+		return
+	}
+	s.Schedule(task.RootID)
 }
 
 func (s *Service) Fail(ctx context.Context, in MoveInput) (TaskDetail, error) {
