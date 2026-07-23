@@ -641,6 +641,14 @@ func resolveAgentConfigSwitchSources(entry agentConfigManifestEntry, def agent.D
 		if index < len(def.ConfigBackup.FileSources) && strings.TrimSpace(def.ConfigBackup.FileSources[index]) != "" {
 			rawPath = strings.TrimSpace(def.ConfigBackup.FileSources[index])
 		}
+		// Codex always reads its user configuration from config.toml. Older
+		// custom Agent definitions sometimes captured a profile-like filename
+		// (for example config_anywolflh.toml), which made switching appear to
+		// succeed while leaving the active Codex configuration unchanged.
+		if strings.EqualFold(strings.TrimSpace(entry.Agent), "codex") &&
+			strings.HasSuffix(strings.ToLower(filepath.Base(rawPath)), ".toml") {
+			rawPath = "~/.codex/config.toml"
+		}
 		sourcePath, err := expandUserPath(rawPath)
 		if err != nil {
 			return nil, err
@@ -755,6 +763,11 @@ func switchAgentConfig(req agentConfigSwitchRequest, app *AppContext) (agentConf
 	}
 	if app != nil && app.GetAgentPool() != nil {
 		app.GetAgentPool().KillAgentProcess(entry.Agent, 0)
+	}
+	if app != nil {
+		if err := app.ResetAgentSessionBindings(context.Background(), entry.Agent); err != nil {
+			log.Printf("[agent-config] reset_session_bindings.error agent=%s err=%v", entry.Agent, err)
+		}
 	}
 	if app != nil && app.GetPreferences() != nil {
 		if err := app.GetPreferences().UpdateAgentLastConfigSelection(entry.Agent, preferences.LastConfigSelection{

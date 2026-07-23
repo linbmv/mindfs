@@ -35,6 +35,45 @@ func TestManagerUsesSessionDBLink(t *testing.T) {
 	}
 }
 
+func TestManagerResetAgentBindingsKeepsOtherAgents(t *testing.T) {
+	ctx := context.Background()
+	root := rootfs.NewRootInfo("mindfs", "mindfs", t.TempDir())
+	manager := NewManager(root)
+	created, err := manager.Create(ctx, CreateInput{Type: TypeChat, Name: "Bindings", Agent: "codex"})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if err := manager.UpdateAgentState(ctx, created, "codex", 4, "codex-thread"); err != nil {
+		t.Fatalf("save codex binding: %v", err)
+	}
+	if err := manager.UpsertAgentBinding(ctx, AgentBinding{
+		SessionKey: created.Key, Agent: "claude", AgentSessionID: "claude-thread", AgentCtxSeq: 2,
+	}); err != nil {
+		t.Fatalf("save claude binding: %v", err)
+	}
+
+	if err := manager.ResetAgentBindings(ctx, "codex"); err != nil {
+		t.Fatalf("reset codex bindings: %v", err)
+	}
+	if binding, err := manager.FindAgentBinding(ctx, created.Key, "codex"); err != nil {
+		t.Fatalf("find reset codex binding: %v", err)
+	} else if binding != nil {
+		t.Fatalf("codex binding was not removed: %#v", binding)
+	}
+	if binding, err := manager.FindAgentBinding(ctx, created.Key, "claude"); err != nil {
+		t.Fatalf("find claude binding: %v", err)
+	} else if binding == nil || binding.AgentSessionID != "claude-thread" {
+		t.Fatalf("claude binding changed: %#v", binding)
+	}
+	current, err := manager.Get(ctx, created.Key, 0)
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if _, ok := current.AgentCtxSeq["codex"]; ok {
+		t.Fatalf("codex context sequence was not cleared: %#v", current.AgentCtxSeq)
+	}
+}
+
 func TestManagerRecordRelatedWorktreeDoesNotOverwriteExisting(t *testing.T) {
 	rootDir := t.TempDir()
 	root := rootfs.NewRootInfo("mindfs", "mindfs", rootDir)

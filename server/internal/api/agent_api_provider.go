@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -381,6 +382,11 @@ func switchAgentAPIProvider(req agentAPIProviderSwitchRequest, app *AppContext) 
 	}
 	if app != nil && app.GetAgentPool() != nil {
 		app.GetAgentPool().KillAgentProcess(agentName, 0)
+	}
+	if app != nil {
+		if err := app.ResetAgentSessionBindings(context.Background(), agentName); err != nil {
+			log.Printf("[agent-api-provider] reset_session_bindings.error agent=%s err=%v", agentName, err)
+		}
 	}
 	triggerAgentConfigSwitchProbe(app, agentName)
 	return provider, nil

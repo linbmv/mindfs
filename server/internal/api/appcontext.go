@@ -122,6 +122,26 @@ func (s *AppContext) GetSessionManager(rootID string) (*session.Manager, error) 
 	return mgr, nil
 }
 
+func (s *AppContext) ResetAgentSessionBindings(ctx context.Context, agentName string) error {
+	if s == nil || s.Dirs == nil {
+		return nil
+	}
+	agentName = strings.TrimSpace(agentName)
+	if agentName == "" {
+		return errors.New("agent required")
+	}
+	for _, root := range s.Dirs.List() {
+		manager, err := s.GetSessionManager(root.ID)
+		if err != nil {
+			return err
+		}
+		if err := manager.ResetAgentBindings(ctx, agentName); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *AppContext) GetKanbanService() (*kanban.Service, error) {
 	if s == nil {
 		return nil, errors.New("app context required")

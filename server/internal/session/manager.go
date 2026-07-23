@@ -40,6 +40,9 @@ WHERE key = ?`
 	deleteBindingsBySessionSQL = `
 DELETE FROM session_agent_bindings
 WHERE session_key = ?`
+	deleteBindingsByAgentSQL = `
+DELETE FROM session_agent_bindings
+WHERE agent = ?`
 	upsertSessionMetaSQL = `
 INSERT INTO sessions (
 		key, type, parent_session_key, parent_tool_call_id, source, task_id, working_dir, model, shell, plan_mode, name, related_files_json, related_worktree_json, created_at, updated_at, closed_at
@@ -830,6 +833,31 @@ func (m *Manager) HasAgentBinding(ctx context.Context, agent, agentSessionID str
 		return false, err
 	}
 	return binding != nil, nil
+}
+
+// ResetAgentBindings forces future messages to start a new external Agent
+// thread. This is required after changing credentials or provider config,
+// because resuming an existing Codex thread restores its original provider.
+func (m *Manager) ResetAgentBindings(_ context.Context, agent string) error {
+	agent = strings.TrimSpace(agent)
+	if agent == "" {
+		return errors.New("agent required")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	db, err := m.ensureSessionMetaDBUnsafe()
+	if err != nil {
+		return err
+	}
+	if _, err := db.Exec(deleteBindingsByAgentSQL, agent); err != nil {
+		return err
+	}
+	for _, current := range m.sessions {
+		if current != nil && current.AgentCtxSeq != nil {
+			delete(current.AgentCtxSeq, agent)
+		}
+	}
+	return nil
 }
 
 func (m *Manager) listAgentBindingsUnsafe(sessionKey string) ([]AgentBinding, error) {

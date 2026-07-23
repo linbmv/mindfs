@@ -123,7 +123,7 @@ func TestResolveAgentConfigSwitchSourcesUsesConfiguredTargets(t *testing.T) {
 	def := agent.Definition{
 		Name: "codex",
 		ConfigBackup: agent.ConfigBackupDefaults{
-			FileSources: []string{"~/.codex/auth.json", "~/.codex/config.toml"},
+			FileSources: []string{"~/.codex/auth.json", "~/.codex/config_anywolflh.toml"},
 		},
 	}
 
