@@ -389,6 +389,11 @@ func (h *WSHandler) broadcastSessionMetaUpdated(rootID string, sess *session.Ses
 }
 
 func (h *WSHandler) broadcastAgentStatusChange(status agent.Status) {
+	if h.AppContext != nil {
+		if prefs := h.AppContext.GetPreferences(); prefs != nil {
+			status = prefs.ApplyAgentDefaults([]agent.Status{status})[0]
+		}
+	}
 	status = applyAgentAPIProviderCapabilities([]agent.Status{status})[0]
 	resp := WSResponse{
 		Type: "agent.status.changed",
@@ -405,6 +410,7 @@ func (h *WSHandler) broadcastAgentStatusChange(status agent.Status) {
 			"default_model_id":                 status.DefaultModelID,
 			"default_effort":                   status.DefaultEffort,
 			"default_fast_service":             status.DefaultFastService,
+			"last_config_selection":            status.LastConfigSelection,
 			"supports_api_provider_switch":     status.SupportsAPIProviderSwitch,
 			"supported_api_provider_protocols": status.SupportedAPIProviderProtocols,
 			"supports_fast_service":            status.SupportsFastService,

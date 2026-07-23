@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	"mindfs/server/internal/agent"
 )
 
 func configurePortableAgentTest(t *testing.T) {
@@ -106,5 +108,39 @@ func TestPortableAgentConfigRejectsUnsafeInput(t *testing.T) {
 	base.Version = portableAgentConfigVersion + 1
 	if _, err := importAgentConfigBackup(base, false); err == nil {
 		t.Fatal("expected unsupported version to be rejected")
+	}
+}
+
+func TestResolveAgentConfigSwitchSourcesUsesConfiguredTargets(t *testing.T) {
+	entry := agentConfigManifestEntry{
+		ID:    "codex-newoctopus",
+		Agent: "codex",
+		Sources: []agentConfigSource{
+			{SourcePath: "/root/.codex/auth.json", BackupPath: "codex-newoctopus/001-auth.json"},
+			{SourcePath: "/root/.codex/config_octopus.toml", BackupPath: "codex-newoctopus/002-config.toml"},
+		},
+	}
+	def := agent.Definition{
+		Name: "codex",
+		ConfigBackup: agent.ConfigBackupDefaults{
+			FileSources: []string{"~/.codex/auth.json", "~/.codex/config.toml"},
+		},
+	}
+
+	resolved, err := resolveAgentConfigSwitchSources(entry, def)
+	if err != nil {
+		t.Fatalf("resolveAgentConfigSwitchSources returned error: %v", err)
+	}
+	if len(resolved) != 2 {
+		t.Fatalf("resolved source count = %d, want 2", len(resolved))
+	}
+	if got := filepath.Base(resolved[0].SourcePath); got != "auth.json" {
+		t.Fatalf("first target = %q, want auth.json", got)
+	}
+	if got := filepath.Base(resolved[1].SourcePath); got != "config.toml" {
+		t.Fatalf("second target = %q, want config.toml", got)
+	}
+	if resolved[1].BackupPath != entry.Sources[1].BackupPath {
+		t.Fatalf("second backup path = %q, want %q", resolved[1].BackupPath, entry.Sources[1].BackupPath)
 	}
 }

@@ -693,7 +693,16 @@ func (s *AppContext) BroadcastAgentStatusChanged(agentName string) {
 	}
 	status, ok := s.GetProber().GetStatus(agentName)
 	if !ok {
-		return
+		for _, candidate := range s.GetProber().GetConfiguredStatuses() {
+			if candidate.Name == agentName {
+				status = candidate
+				ok = true
+				break
+			}
+		}
+		if !ok {
+			return
+		}
 	}
 	statuses := []agent.Status{status}
 	if prefs := s.GetPreferences(); prefs != nil {
@@ -715,6 +724,7 @@ func (s *AppContext) BroadcastAgentStatusChanged(agentName string) {
 			"default_model_id":                 status.DefaultModelID,
 			"default_effort":                   status.DefaultEffort,
 			"default_fast_service":             status.DefaultFastService,
+			"last_config_selection":            status.LastConfigSelection,
 			"supports_api_provider_switch":     status.SupportsAPIProviderSwitch,
 			"supported_api_provider_protocols": status.SupportedAPIProviderProtocols,
 			"supports_fast_service":            status.SupportsFastService,

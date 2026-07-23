@@ -627,6 +627,40 @@ func safeAgentConfigBackupPath(configRoot, relativePath string) (string, error) 
 	return path, nil
 }
 
+// resolveAgentConfigSwitchSources maps portable/profile source entries to the
+// paths the currently configured Agent actually reads. An exported profile may
+// contain a machine-specific filename such as config_octopus.toml, while the
+// Codex runtime still reads ~/.codex/config.toml. The configured defaults are
+// ordered to match the backup file list and are therefore the authoritative
+// restore targets.
+func resolveAgentConfigSwitchSources(entry agentConfigManifestEntry, def agent.Definition) ([]agentConfigSource, error) {
+	resolved := make([]agentConfigSource, 0, len(entry.Sources))
+	seen := make(map[string]struct{}, len(entry.Sources))
+	for index, source := range entry.Sources {
+		rawPath := strings.TrimSpace(source.SourcePath)
+		if index < len(def.ConfigBackup.FileSources) && strings.TrimSpace(def.ConfigBackup.FileSources[index]) != "" {
+			rawPath = strings.TrimSpace(def.ConfigBackup.FileSources[index])
+		}
+		sourcePath, err := expandUserPath(rawPath)
+		if err != nil {
+			return nil, err
+		}
+		sourcePath = filepath.Clean(strings.TrimSpace(sourcePath))
+		if sourcePath == "" || !filepath.IsAbs(sourcePath) {
+			return nil, fmt.Errorf("config source path must be absolute: %s", rawPath)
+		}
+		if _, exists := seen[sourcePath]; exists {
+			return nil, fmt.Errorf("duplicate config switch target: %s", sourcePath)
+		}
+		seen[sourcePath] = struct{}{}
+		resolved = append(resolved, agentConfigSource{
+			SourcePath: sourcePath,
+			BackupPath: source.BackupPath,
+		})
+	}
+	return resolved, nil
+}
+
 func switchAgentConfig(req agentConfigSwitchRequest, app *AppContext) (agentConfigManifestEntry, bool, error) {
 	id := strings.TrimSpace(req.ID)
 	if id == "" {
@@ -649,8 +683,20 @@ func switchAgentConfig(req agentConfigSwitchRequest, app *AppContext) (agentConf
 	if len(entry.Sources) == 0 && len(entry.EnvKeys) == 0 {
 		return agentConfigManifestEntry{}, false, errors.New("backup has no config content")
 	}
+	cfg, err := agent.LoadConfig("")
+	if err != nil {
+		return agentConfigManifestEntry{}, false, err
+	}
+	def, ok := cfg.GetAgent(entry.Agent)
+	if !ok {
+		return agentConfigManifestEntry{}, false, fmt.Errorf("agent not configured: %s", entry.Agent)
+	}
+	switchSources, err := resolveAgentConfigSwitchSources(entry, def)
+	if err != nil {
+		return agentConfigManifestEntry{}, false, err
+	}
 	exists := false
-	for _, source := range entry.Sources {
+	for _, source := range switchSources {
 		sourcePath, err := expandUserPath(source.SourcePath)
 		if err != nil {
 			return agentConfigManifestEntry{}, false, err
@@ -669,7 +715,7 @@ func switchAgentConfig(req agentConfigSwitchRequest, app *AppContext) (agentConf
 	if err != nil {
 		return agentConfigManifestEntry{}, false, err
 	}
-	for _, source := range entry.Sources {
+	for _, source := range switchSources {
 		sourcePath, err := expandUserPath(source.SourcePath)
 		if err != nil {
 			return agentConfigManifestEntry{}, false, err
@@ -718,6 +764,9 @@ func switchAgentConfig(req agentConfigSwitchRequest, app *AppContext) (agentConf
 		}); err != nil {
 			return agentConfigManifestEntry{}, false, err
 		}
+	}
+	if app != nil {
+		app.BroadcastAgentStatusChanged(entry.Agent)
 	}
 	triggerAgentConfigSwitchProbe(app, entry.Agent)
 	return entry, false, nil

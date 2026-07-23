@@ -376,6 +376,9 @@ func switchAgentAPIProvider(req agentAPIProviderSwitchRequest, app *AppContext) 
 			return agentAPIProvider{}, err
 		}
 	}
+	if app != nil {
+		app.BroadcastAgentStatusChanged(agentName)
+	}
 	if app != nil && app.GetAgentPool() != nil {
 		app.GetAgentPool().KillAgentProcess(agentName, 0)
 	}
