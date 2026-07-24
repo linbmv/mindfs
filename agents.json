@@ -144,32 +144,14 @@
       ],
       "configBackup": {
         "fileSources": [
-          "~/.grok/config.json",
+          "~/.grok/config.toml",
           "~/.grok/auth.json"
         ],
         "envKeys": [
           "XAI_API_KEY",
-          "GROK_XAI_API_BASE_URL"
+          "GROK_MODELS_BASE_URL"
         ]
       }
-    },
-    {
-      "name": "cursor",
-      "brief": "把 Cursor agent 带到终端、脚本和自动化流程；适合复用 Cursor 的代码上下文、MCP、headless 执行和带安全检查的 shell mode。",
-      "installCommands": [
-        { "os": ["darwin", "linux"], "command": "curl https://cursor.com/install -fsS | bash" },
-        { "os": "windows", "command": "irm 'https://cursor.com/install?win32=true' | iex" }
-      ],
-      "updateCommands": [
-        { "os": ["darwin", "linux"], "command": "curl https://cursor.com/install -fsS | bash" },
-        { "os": "windows", "command": "irm 'https://cursor.com/install?win32=true' | iex" }
-      ],
-      "command": "agent",
-      "protocol": "acp",
-      "args": [
-        "acp"
-      ],
-      "configBackup": {}
     },
     {
       "name": "augment",

@@ -641,14 +641,7 @@ func resolveAgentConfigSwitchSources(entry agentConfigManifestEntry, def agent.D
 		if index < len(def.ConfigBackup.FileSources) && strings.TrimSpace(def.ConfigBackup.FileSources[index]) != "" {
 			rawPath = strings.TrimSpace(def.ConfigBackup.FileSources[index])
 		}
-		// Codex always reads its user configuration from config.toml. Older
-		// custom Agent definitions sometimes captured a profile-like filename
-		// (for example config_anywolflh.toml), which made switching appear to
-		// succeed while leaving the active Codex configuration unchanged.
-		if strings.EqualFold(strings.TrimSpace(entry.Agent), "codex") &&
-			strings.HasSuffix(strings.ToLower(filepath.Base(rawPath)), ".toml") {
-			rawPath = "~/.codex/config.toml"
-		}
+		rawPath = normalizeAgentConfigSwitchPath(entry.Agent, rawPath)
 		sourcePath, err := expandUserPath(rawPath)
 		if err != nil {
 			return nil, err
@@ -667,6 +660,219 @@ func resolveAgentConfigSwitchSources(entry agentConfigManifestEntry, def agent.D
 		})
 	}
 	return resolved, nil
+}
+
+// normalizeAgentConfigSwitchPath remaps profile/exported paths onto the files
+// each agent runtime actually loads. Older custom definitions often recorded
+// alternate filenames (config_octopus.toml, config.json) that made a switch
+// appear successful while leaving the live configuration unchanged.
+func normalizeAgentConfigSwitchPath(agentName, rawPath string) string {
+	agentName = strings.ToLower(strings.TrimSpace(agentName))
+	rawPath = strings.TrimSpace(rawPath)
+	base := strings.ToLower(filepath.Base(rawPath))
+	switch agentName {
+	case "codex":
+		// Codex always reads its user configuration from config.toml.
+		if strings.HasSuffix(base, ".toml") {
+			return "~/.codex/config.toml"
+		}
+	case "grok":
+		// Grok CLI reads ~/.grok/config.toml. Older MindFS definitions used
+		// config.json, so switching only touched a file the CLI never loads.
+		if base == "config.json" || base == "config.toml" || strings.HasSuffix(base, ".toml") {
+			return "~/.grok/config.toml"
+		}
+	}
+	return rawPath
+}
+
+// normalizeGrokSwitchEnv maps legacy MindFS Grok env keys onto the names the
+// CLI actually honors. GROK_XAI_API_BASE_URL was never a Grok official variable;
+// GROK_MODELS_BASE_URL is the documented override for models_base_url.
+func normalizeGrokSwitchEnv(env map[string]string) map[string]string {
+	if len(env) == 0 {
+		return env
+	}
+	out := cloneStringMap(env)
+	if out == nil {
+		out = map[string]string{}
+	}
+	if _, ok := out["GROK_MODELS_BASE_URL"]; !ok {
+		if legacy := strings.TrimSpace(out["GROK_XAI_API_BASE_URL"]); legacy != "" {
+			out["GROK_MODELS_BASE_URL"] = legacy
+		}
+	}
+	delete(out, "GROK_XAI_API_BASE_URL")
+	return out
+}
+
+// applyGrokConfigFromEnv writes the selected backup credentials into the live
+// Grok config.toml. Per-model api_key in that file outranks XAI_API_KEY, so an
+// env-only switch would leave the CLI on the previous provider.
+func applyGrokConfigFromEnv(env map[string]string) error {
+	env = normalizeGrokSwitchEnv(env)
+	apiKey := strings.TrimSpace(env["XAI_API_KEY"])
+	baseURL := strings.TrimSpace(env["GROK_MODELS_BASE_URL"])
+	if apiKey == "" && baseURL == "" {
+		return nil
+	}
+	configPath, err := expandUserPath("~/.grok/config.toml")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		return apperr.Wrap("mkdir", filepath.Dir(configPath), err)
+	}
+	existing, err := os.ReadFile(configPath)
+	if err != nil && !os.IsNotExist(err) {
+		return apperr.Wrap("read", configPath, err)
+	}
+	updated := mergeGrokConfigFromEnv(string(existing), apiKey, baseURL)
+	return apperr.Wrap("write", configPath, os.WriteFile(configPath, []byte(updated), 0o600))
+}
+
+func mergeGrokConfigFromEnv(existing, apiKey, baseURL string) string {
+	text := strings.ReplaceAll(existing, "\r\n", "\n")
+	if strings.TrimSpace(text) == "" {
+		var b strings.Builder
+		if baseURL != "" {
+			b.WriteString("[endpoints]\n")
+			b.WriteString(fmt.Sprintf("models_base_url = %q\n", baseURL))
+		}
+		if apiKey != "" {
+			if b.Len() > 0 {
+				b.WriteString("\n")
+			}
+			b.WriteString("[model.\"grok-4.5\"]\n")
+			b.WriteString("model = \"grok-4.5\"\n")
+			b.WriteString("name = \"Grok 4.5\"\n")
+			b.WriteString(fmt.Sprintf("api_key = %q\n", apiKey))
+		}
+		return b.String()
+	}
+
+	lines := strings.Split(text, "\n")
+	out := make([]string, 0, len(lines)+8)
+	currentTable := ""
+	hasEndpoints := false
+	endpointsHasBaseURL := false
+	modelTablesWithAPIKey := map[string]bool{}
+	modelTablesSeen := map[string]bool{}
+
+	// First pass: rewrite known keys in place and track which tables exist.
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			currentTable = trimmed
+			if currentTable == "[endpoints]" {
+				hasEndpoints = true
+			}
+			if isGrokModelTable(currentTable) {
+				modelTablesSeen[currentTable] = true
+			}
+			out = append(out, line)
+			continue
+		}
+		if currentTable == "[endpoints]" && baseURL != "" && isTOMLKeyAssignment(trimmed, "models_base_url") {
+			out = append(out, fmt.Sprintf("models_base_url = %q", baseURL))
+			endpointsHasBaseURL = true
+			continue
+		}
+		if isGrokModelTable(currentTable) && apiKey != "" && isTOMLKeyAssignment(trimmed, "api_key") {
+			out = append(out, fmt.Sprintf("api_key = %q", apiKey))
+			modelTablesWithAPIKey[currentTable] = true
+			continue
+		}
+		if currentTable == "[endpoints]" && isTOMLKeyAssignment(trimmed, "models_base_url") {
+			endpointsHasBaseURL = true
+		}
+		if isGrokModelTable(currentTable) && isTOMLKeyAssignment(trimmed, "api_key") {
+			modelTablesWithAPIKey[currentTable] = true
+		}
+		out = append(out, line)
+	}
+
+	// Second pass: inject missing keys into existing tables.
+	if baseURL != "" && hasEndpoints && !endpointsHasBaseURL {
+		out = injectKeyIntoTOMLTable(out, "[endpoints]", fmt.Sprintf("models_base_url = %q", baseURL))
+		endpointsHasBaseURL = true
+	}
+	if apiKey != "" {
+		for table := range modelTablesSeen {
+			if !modelTablesWithAPIKey[table] {
+				out = injectKeyIntoTOMLTable(out, table, fmt.Sprintf("api_key = %q", apiKey))
+				modelTablesWithAPIKey[table] = true
+			}
+		}
+	}
+
+	// Append sections that did not exist at all.
+	result := strings.Join(out, "\n")
+	result = strings.TrimRight(result, "\n")
+	if baseURL != "" && !hasEndpoints {
+		if result != "" {
+			result += "\n\n"
+		}
+		result += "[endpoints]\n" + fmt.Sprintf("models_base_url = %q", baseURL)
+	}
+	if apiKey != "" && len(modelTablesSeen) == 0 {
+		if result != "" {
+			result += "\n\n"
+		}
+		result += "[model.\"grok-4.5\"]\nmodel = \"grok-4.5\"\nname = \"Grok 4.5\"\n" + fmt.Sprintf("api_key = %q", apiKey)
+	}
+	if !strings.HasSuffix(result, "\n") {
+		result += "\n"
+	}
+	return result
+}
+
+func isGrokModelTable(table string) bool {
+	table = strings.TrimSpace(table)
+	if !strings.HasPrefix(table, "[") || !strings.HasSuffix(table, "]") {
+		return false
+	}
+	inner := strings.TrimSpace(table[1 : len(table)-1])
+	return strings.HasPrefix(inner, "model.")
+}
+
+func isTOMLKeyAssignment(line, key string) bool {
+	line = strings.TrimSpace(line)
+	if line == "" || strings.HasPrefix(line, "#") {
+		return false
+	}
+	if !strings.HasPrefix(line, key) {
+		return false
+	}
+	rest := strings.TrimSpace(line[len(key):])
+	return strings.HasPrefix(rest, "=")
+}
+
+func injectKeyIntoTOMLTable(lines []string, tableHeader, assignment string) []string {
+	out := make([]string, 0, len(lines)+1)
+	inTable := false
+	injected := false
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			if inTable && !injected {
+				out = append(out, assignment)
+				injected = true
+			}
+			inTable = trimmed == tableHeader
+			out = append(out, line)
+			continue
+		}
+		out = append(out, line)
+		if i == len(lines)-1 && inTable && !injected {
+			out = append(out, assignment)
+			injected = true
+		}
+	}
+	if inTable && !injected {
+		out = append(out, assignment)
+	}
+	return out
 }
 
 func switchAgentConfig(req agentConfigSwitchRequest, app *AppContext) (agentConfigManifestEntry, bool, error) {
@@ -716,6 +922,18 @@ func switchAgentConfig(req agentConfigSwitchRequest, app *AppContext) (agentConf
 			return agentConfigManifestEntry{}, false, apperr.Wrap("stat", sourcePath, err)
 		}
 	}
+	// Grok env-only profiles still rewrite ~/.grok/config.toml (api_key outranks
+	// process env). Treat an existing live config as an overwrite target so the
+	// UI confirmation path stays consistent with file-based profiles.
+	if !exists && strings.EqualFold(strings.TrimSpace(entry.Agent), "grok") && len(entry.EnvKeys) > 0 {
+		if configPath, err := expandUserPath("~/.grok/config.toml"); err == nil {
+			if _, err := os.Stat(configPath); err == nil {
+				exists = true
+			} else if err != nil && !os.IsNotExist(err) {
+				return agentConfigManifestEntry{}, false, apperr.Wrap("stat", configPath, err)
+			}
+		}
+	}
 	if exists && !req.ConfirmOverwrite {
 		return entry, true, nil
 	}
@@ -747,6 +965,14 @@ func switchAgentConfig(req agentConfigSwitchRequest, app *AppContext) (agentConf
 			return agentConfigManifestEntry{}, false, err
 		}
 		env = parsedEnv
+		if strings.EqualFold(strings.TrimSpace(entry.Agent), "grok") {
+			env = normalizeGrokSwitchEnv(env)
+			// Grok's config.toml api_key outranks process env. Env-only backups
+			// must still rewrite the live config or /status keeps the old provider.
+			if err := applyGrokConfigFromEnv(env); err != nil {
+				return agentConfigManifestEntry{}, false, err
+			}
+		}
 		if err := updateAgentEnvConfig(entry.Agent, env); err != nil {
 			return agentConfigManifestEntry{}, false, err
 		}
