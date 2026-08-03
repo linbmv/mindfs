@@ -172,7 +172,8 @@ type FileTreeProps = {
   onGitDiffSideBySideChange?: (enabled: boolean) => void;
   multiProjectSessionsEnabled?: boolean;
   onMultiProjectSessionsChange?: (enabled: boolean) => void;
-  onRunAgentLifecycleCommand?: (agentName: string, action: "install" | "update", commands: string[]) => void | Promise<void>;
+  onRunAgentLifecycleCommand?: (agentName: string, action: AgentLifecycleCommandAction, commands: string[]) => void | Promise<void>;
+  onRestartAgent?: (agentName: string) => void | Promise<void>;
   onGoHome?: () => void;
   footerTopContent?: React.ReactNode;
 };
@@ -181,6 +182,7 @@ type AgentConfigFlow = "backup" | "switch";
 type AgentConfigStep = "details" | "edit" | "confirm";
 type AgentConfigAddTab = "backup" | "api";
 type AgentConfigSwitchSelection = { type: "backup" | "api_provider"; id: string };
+type AgentLifecycleCommandAction = "install" | "update";
 
 function isAgentConfigBackupConflict(error: unknown): boolean {
   const maybeError = error as { status?: unknown; message?: unknown; payload?: { error?: unknown; message?: unknown } } | null;
@@ -386,6 +388,24 @@ const ChevronRight = ({ isOpen }: { isOpen: boolean }) => (
     <polyline points="9 18 15 12 9 6" />
   </svg>
 );
+
+function RestartSpinner() {
+  return (
+    <span
+      aria-label="restarting"
+      style={{
+        width: "12px",
+        height: "12px",
+        border: "1.5px solid currentColor",
+        borderTopColor: "transparent",
+        borderRadius: "50%",
+        animation: "mindfs-update-spin 0.8s linear infinite",
+        display: "inline-block",
+        boxSizing: "border-box",
+      }}
+    />
+  );
+}
 
 function DirectoryIconSlot({ entry, isOpen }: { entry: FileEntry; isOpen: boolean }) {
   const showSymlinkBadge = entry.is_dir && entry.is_symlink;
@@ -623,6 +643,7 @@ function AgentConfigPopover({
   editConfig,
   confirmMessage,
   busy,
+  restartingAgent,
   error,
   onChooseAgent,
   onAddTabChange,
@@ -641,6 +662,10 @@ function AgentConfigPopover({
   onSaveEdit,
   onBackToDetails,
   onSave,
+  onSelectedBackupChange,
+  onSelectedAPIProviderChange,
+  onSwitch,
+  onRestartAgent,
   onConfirm,
   onCancel,
 }: {
@@ -662,6 +687,7 @@ function AgentConfigPopover({
   editConfig: PortableAgentConfig | null;
   confirmMessage: string;
   busy: boolean;
+  restartingAgent: string;
   error: string;
   onChooseAgent: (name: string) => void;
   onAddTabChange: (tab: AgentConfigAddTab) => void;
@@ -680,6 +706,10 @@ function AgentConfigPopover({
   onSaveEdit: () => void;
   onBackToDetails: () => void;
   onSave: () => void;
+  onSelectedBackupChange: (id: string) => void;
+  onSelectedAPIProviderChange: (id: string) => void;
+  onSwitch: () => void;
+  onRestartAgent?: (agentName: string) => void | Promise<void>;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
@@ -740,6 +770,26 @@ function AgentConfigPopover({
               </option>
             ))}
           </select>
+          {flow === "switch" && onRestartAgent && selectedAgent ? (
+            <button
+              type="button"
+              disabled={busy || restartingAgent !== ""}
+              onClick={() => void onRestartAgent(selectedAgent)}
+              style={{
+                ...agentConfigSecondaryButtonStyle(busy || restartingAgent !== ""),
+                minWidth: "56px",
+                padding: "6px 8px",
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: "5px",
+                flexShrink: 0,
+              }}
+            >
+              {restartingAgent === selectedAgent ? <RestartSpinner /> : null}
+              {t("agentConfig.restart")}
+            </button>
+          ) : null}
         </div>
       ) : null}
       {step === "confirm" ? (
@@ -992,7 +1042,10 @@ function AgentConfigPopover({
                       gap: "2px",
                     }}
                   >
-                    <div
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => onSelectedBackupChange(item.id)}
                       style={{
                         minWidth: 0,
                         flex: 1,
@@ -1002,12 +1055,15 @@ function AgentConfigPopover({
                         alignItems: "center",
                         gap: "8px",
                         textAlign: "left",
+                        border: 0,
+                        background: "transparent",
+                        cursor: busy ? "default" : "pointer",
                       }}
                     >
                       <AgentIcon agentName={item.agent} style={{ width: "14px", height: "14px", flexShrink: 0 }} />
                       <span style={{ minWidth: 0, flex: 1, fontSize: "12px", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.name}</span>
                       {selected ? <span aria-label={t("agentConfig.currentConfig")} title={t("agentConfig.currentConfig")} style={{ fontSize: "11px" }}>✓</span> : null}
-                    </div>
+                    </button>
                     <button
                       type="button"
                       aria-label={t("agentConfig.editConfig", { name: item.name })}
@@ -1063,7 +1119,10 @@ function AgentConfigPopover({
                       gap: "2px",
                     }}
                   >
-                    <div
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => onSelectedAPIProviderChange(item.id)}
                       style={{
                         minWidth: 0,
                         flex: 1,
@@ -1073,6 +1132,9 @@ function AgentConfigPopover({
                         alignItems: "center",
                         gap: "8px",
                         textAlign: "left",
+                        border: 0,
+                        background: "transparent",
+                        cursor: busy ? "default" : "pointer",
                       }}
                     >
                       <div style={{ minWidth: 0, flex: 1 }}>
@@ -1080,7 +1142,7 @@ function AgentConfigPopover({
                         <div style={{ marginTop: "4px", fontSize: "11px", color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{summary}</div>
                       </div>
                       {selected ? <span aria-label={t("agentConfig.currentConfig")} title={t("agentConfig.currentConfig")} style={{ fontSize: "11px" }}>✓</span> : null}
-                    </div>
+                    </button>
                     <button
                       type="button"
                       aria-label={t("agentConfig.deleteAPIProvider", { name: item.name })}
@@ -1098,6 +1160,19 @@ function AgentConfigPopover({
                 ) : null}
               </>
             )}
+          </div>
+          <div style={agentConfigActionRowStyle}>
+            <button type="button" disabled={busy} onClick={onCancel} style={agentConfigSecondaryButtonStyle(busy)}>
+              {t("common.cancel")}
+            </button>
+            <button
+              type="button"
+              disabled={busy || (!selectedBackupID && !selectedAPIProviderID)}
+              onClick={onSwitch}
+              style={agentConfigPrimaryButtonStyle(busy || (!selectedBackupID && !selectedAPIProviderID))}
+            >
+              {t("agentConfig.switch")}
+            </button>
           </div>
         </>
       )}
@@ -1440,6 +1515,7 @@ export function FileTree({
   multiProjectSessionsEnabled = false,
   onMultiProjectSessionsChange,
   onRunAgentLifecycleCommand,
+  onRestartAgent,
   onGoHome,
   footerTopContent,
 }: FileTreeProps) {
@@ -1495,6 +1571,7 @@ export function FileTree({
   const [agentConfigConfirmMessage, setAgentConfigConfirmMessage] = React.useState("");
   const [agentConfigDirty, setAgentConfigDirty] = React.useState(false);
   const [agentConfigBusy, setAgentConfigBusy] = React.useState(false);
+  const [agentConfigRestartingAgent, setAgentConfigRestartingAgent] = React.useState("");
   const [agentConfigError, setAgentConfigError] = React.useState("");
   const [agentLifecycleOpen, setAgentLifecycleOpen] = React.useState(false);
   const [relayServicesOpen, setRelayServicesOpen] = React.useState(false);
@@ -1947,6 +2024,7 @@ export function FileTree({
     setAgentConfigConfirmMessage("");
     setAgentConfigDirty(false);
     setAgentConfigError("");
+    setAgentConfigRestartingAgent("");
     setIsMenuOpen(false);
     setAgentConfigBusy(true);
     fetchAgents(true)
@@ -1999,6 +2077,7 @@ export function FileTree({
     setAgentConfigConfirmMessage("");
     setAgentConfigDirty(false);
     setAgentConfigError("");
+    setAgentConfigRestartingAgent("");
     setIsMenuOpen(false);
     setAgentConfigBusy(true);
     fetchAgents(true)
@@ -2019,6 +2098,7 @@ export function FileTree({
     setAgentConfigConfirmMessage("");
     setAgentConfigSwitchSelection(null);
     setAgentConfigDirty(false);
+    setAgentConfigRestartingAgent("");
   }, []);
 
   // Cancel paths (ESC, outside click, close button) go through this guard so
@@ -2114,7 +2194,7 @@ export function FileTree({
     setRelayServicesEditing(false);
   }, []);
 
-  const runAgentLifecycleCommand = React.useCallback(async (agent: AgentStatus, action: "install" | "update") => {
+  const runAgentLifecycleCommand = React.useCallback(async (agent: AgentStatus, action: AgentLifecycleCommandAction) => {
     const commands = action === "install" ? agent.install_commands || [] : agent.update_commands || [];
     if (commands.length === 0) {
       setAgentLifecycleError(t("agentConfig.noCommand"));
@@ -2133,6 +2213,21 @@ export function FileTree({
       setAgentLifecycleRunningAgent("");
     }
   }, [closeAgentLifecycleFlow, onRunAgentLifecycleCommand, t]);
+
+  const restartAgentFromConfigList = React.useCallback(async (agentName: string) => {
+    if (!agentName || !onRestartAgent || agentConfigRestartingAgent) {
+      return;
+    }
+    setAgentConfigRestartingAgent(agentName);
+    setAgentConfigError("");
+    try {
+      await onRestartAgent(agentName);
+    } catch (error) {
+      setAgentConfigError(error instanceof Error ? error.message : t("agentConfig.restartFailed"));
+    } finally {
+      setAgentConfigRestartingAgent("");
+    }
+  }, [agentConfigRestartingAgent, onRestartAgent, t]);
 
   const chooseAgentForConfig = React.useCallback(async (agentName: string) => {
     setAgentConfigAgent(agentName);
@@ -3348,6 +3443,7 @@ export function FileTree({
               editConfig={agentConfigEdit}
               confirmMessage={agentConfigConfirmMessage}
               busy={agentConfigBusy}
+              restartingAgent={agentConfigRestartingAgent}
               error={agentConfigError}
               onChooseAgent={(name) => {
                 void chooseAgentForConfig(name);
@@ -3407,6 +3503,20 @@ export function FileTree({
                 }
                 void saveAgentConfigBackup();
               }}
+              onSelectedBackupChange={(id) => {
+                setSelectedAgentConfigID(id);
+                setSelectedAgentAPIProviderID("");
+                setAgentConfigSwitchSelection({ type: "backup", id });
+              }}
+              onSelectedAPIProviderChange={(id) => {
+                setSelectedAgentAPIProviderID(id);
+                setSelectedAgentConfigID("");
+                setAgentConfigSwitchSelection({ type: "api_provider", id });
+              }}
+              onSwitch={() => {
+                void runAgentConfigSwitch(false);
+              }}
+              onRestartAgent={agentConfigFlow === "switch" ? restartAgentFromConfigList : undefined}
               onConfirm={() => {
                 if (agentConfigFlow === "backup") {
                   void saveAgentConfigBackup(true);

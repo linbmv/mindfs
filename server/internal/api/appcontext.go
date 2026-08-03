@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -52,6 +53,7 @@ type AppContext struct {
 	Kanban    *kanban.Service
 
 	mu                       sync.RWMutex
+	sessionWorktreeMu        sync.Mutex
 	roots                    map[string]*RootContext // root id -> root context
 	fileChangeListeners      []func(fs.FileChangeEvent)
 	fileChangeBatchListeners []func(fs.FileChangeBatchEvent)
@@ -74,6 +76,14 @@ func (s *AppContext) GetRootContext(rootID string) (*RootContext, error) {
 	}
 	if root.ID == "" {
 		return nil, errors.New("invalid root")
+	}
+	exists, err := managedRootExists(root)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		s.removeMissingRoot(root)
+		return nil, errors.New("root not found")
 	}
 
 	s.mu.RLock()
@@ -186,6 +196,51 @@ func (s *AppContext) CreateTaskWorktree(ctx context.Context, rootID, name, branc
 	return kanban.WorktreeInfo{RootID: rootID, Path: out.Dir.RootPath}, nil
 }
 
+func (s *AppContext) CreateSessionWorktree(ctx context.Context, rootID, branchMode, branch string) (kanban.WorktreeInfo, error) {
+	root, err := s.GetRoot(rootID)
+	if err != nil {
+		return kanban.WorktreeInfo{}, err
+	}
+	s.sessionWorktreeMu.Lock()
+	defer s.sessionWorktreeMu.Unlock()
+
+	names := make([]string, 0, 16)
+	worktreeParent := filepath.Join(root.RootPath, ".worktree")
+	if entries, readErr := os.ReadDir(worktreeParent); readErr == nil {
+		for _, entry := range entries {
+			names = append(names, entry.Name())
+		}
+	} else if !os.IsNotExist(readErr) {
+		return kanban.WorktreeInfo{}, readErr
+	}
+	branches, err := gitview.ListBranches(ctx, root.RootPath)
+	if err != nil {
+		return kanban.WorktreeInfo{}, err
+	}
+	for _, item := range branches.Branches {
+		names = append(names, item.Name)
+	}
+	name := nextSessionWorktreeName(time.Now(), names)
+	return s.CreateTaskWorktree(ctx, rootID, name, branchMode, branch)
+}
+
+func nextSessionWorktreeName(now time.Time, existingNames []string) string {
+	prefix := "session-" + now.Format("0102") + "-"
+	maxSequence := 0
+	for _, name := range existingNames {
+		name = strings.TrimSpace(name)
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		suffix := strings.TrimPrefix(name, prefix)
+		sequence, err := strconv.Atoi(suffix)
+		if err == nil && sequence > maxSequence {
+			maxSequence = sequence
+		}
+	}
+	return fmt.Sprintf("%s%02d", prefix, maxSequence+1)
+}
+
 func ensureTaskWorktreeExcluded(rootPath string) error {
 	gitDir := filepath.Join(rootPath, ".git")
 	if info, err := os.Stat(gitDir); err != nil || !info.IsDir() {
@@ -286,6 +341,7 @@ func (s *AppContext) RunAgentStage(ctx context.Context, exec kanban.AgentStageEx
 	sessionName := s.sessionTitle(exec.RootID, sessionKey)
 	updateTracker := newTurnUpdateTracker()
 	planMode := exec.Stage.PlanMode
+	userTimestamp := time.Now().UTC()
 	err := uc.SendMessage(ctx, usecase.SendMessageInput{
 		RootID:          exec.RootID,
 		RuntimeRootPath: exec.RuntimeRootPath,
@@ -297,8 +353,9 @@ func (s *AppContext) RunAgentStage(ctx context.Context, exec kanban.AgentStageEx
 		FastService:     normalizeFastServiceValue(exec.Stage.FastService),
 		PlanMode:        &planMode,
 		Content:         exec.Prompt,
-		OnStart: func() {
-			s.BroadcastSessionUserMessage(exec.RootID, sessionKey, session.TypeChat, sessionName, exec.Stage.Agent, exec.Stage.Model, exec.Stage.Mode, exec.Stage.Effort, exec.Stage.FastService, planMode, exec.Prompt)
+		UserTimestamp:   userTimestamp,
+		OnStart: func(start usecase.MessageStart) {
+			s.BroadcastSessionUserMessageAt(exec.RootID, sessionKey, session.TypeChat, sessionName, exec.Stage.Agent, start.Model, start.Mode, start.Effort, start.FastService, planMode, exec.Prompt, userTimestamp)
 		},
 		OnUpdate: func(update agenttypes.Event) {
 			updateTracker.Begin()
@@ -612,7 +669,50 @@ func (s *AppContext) ListRoots() []fs.RootInfo {
 	if s.Dirs == nil {
 		return []fs.RootInfo{}
 	}
-	return s.Dirs.List()
+	roots := s.Dirs.List()
+	active := make([]fs.RootInfo, 0, len(roots))
+	for _, root := range roots {
+		exists, err := managedRootExists(root)
+		if err != nil {
+			log.Printf("[registry] stat.root.error root=%s path=%s err=%v", root.ID, root.RootPath, err)
+			active = append(active, root)
+			continue
+		}
+		if exists {
+			active = append(active, root)
+			continue
+		}
+		s.removeMissingRoot(root)
+	}
+	return active
+}
+
+func managedRootExists(root fs.RootInfo) (bool, error) {
+	path := strings.TrimSpace(root.RootPath)
+	if path == "" {
+		return false, nil
+	}
+	info, err := os.Stat(filepath.Clean(path))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return info.IsDir(), nil
+}
+
+func (s *AppContext) removeMissingRoot(root fs.RootInfo) {
+	if s == nil || s.Dirs == nil {
+		return
+	}
+	dir, err := s.RemoveRoot(root.RootPath)
+	if err != nil {
+		log.Printf("[registry] remove.missing_root.error root=%s path=%s err=%v", root.ID, root.RootPath, err)
+		s.ReleaseRootResources(root.ID)
+		return
+	}
+	log.Printf("[registry] remove.missing_root root=%s path=%s", dir.ID, dir.RootPath)
 }
 
 func (s *AppContext) AddFileChangeListener(listener func(fs.FileChangeEvent)) {
@@ -692,6 +792,7 @@ func (s *AppContext) BroadcastSessionMetaUpdated(rootID string, sess *session.Se
 				"type":                sess.Type,
 				"parent_session_key":  sess.ParentSessionKey,
 				"parent_tool_call_id": sess.ParentToolCallID,
+				"source":              sess.Source,
 				"task_id":             sess.TaskID,
 				"name":                sess.Name,
 				"agent":               session.InferAgentFromSession(sess),
@@ -700,6 +801,7 @@ func (s *AppContext) BroadcastSessionMetaUpdated(rootID string, sess *session.Se
 				"effort":              session.InferEffortFromSession(sess),
 				"fast_service":        session.InferFastServiceFromSession(sess),
 				"plan_mode":           sess.PlanMode,
+				"related_worktree":    sess.RelatedWorktree,
 				"updated_at":          sess.UpdatedAt,
 			},
 		},
@@ -764,8 +866,12 @@ func (s *AppContext) SetSessionPendingReply(rootID, sessionKey, sessionTitle str
 }
 
 func (s *AppContext) BroadcastSessionUserMessage(rootID, sessionKey, sessionType, sessionName, agentName, model, mode, effort, fastService string, planMode bool, content string) {
+	s.BroadcastSessionUserMessageAt(rootID, sessionKey, sessionType, sessionName, agentName, model, mode, effort, fastService, planMode, content, time.Now().UTC())
+}
+
+func (s *AppContext) BroadcastSessionUserMessageAt(rootID, sessionKey, sessionType, sessionName, agentName, model, mode, effort, fastService string, planMode bool, content string, timestamp time.Time) {
 	s.ClearTaskAuxFlagsForSession(rootID, sessionKey)
-	s.GetSessionStreamHub().BroadcastSessionUserMessage(rootID, sessionKey, sessionType, sessionName, agentName, model, mode, effort, fastService, planMode, content, "", false)
+	s.GetSessionStreamHub().BroadcastSessionUserMessageAt(rootID, sessionKey, sessionType, sessionName, agentName, model, mode, effort, fastService, planMode, content, timestamp, "", false)
 }
 
 func (s *AppContext) BroadcastSessionUpdate(rootID, sessionKey string, update agenttypes.Event) {

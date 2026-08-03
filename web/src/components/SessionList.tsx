@@ -21,6 +21,7 @@ export type SessionItem = {
   name?: string;
   created_at?: string;
   updated_at?: string;
+  pinned_at?: string | null;
   closed_at?: string;
   pending?: boolean;
   related_files?: Array<{ path: string }>;
@@ -47,6 +48,7 @@ type SessionListProps = {
   onSelect?: (session: SessionItem) => void;
   onRestore?: (session: SessionItem) => void;
   onSync?: (session: SessionItem) => Promise<void> | void;
+  onPin?: (session: SessionItem, pinned: boolean) => Promise<boolean> | boolean;
   onRename?: (session: SessionItem, nextName: string) => Promise<boolean> | boolean;
   onDelete?: (session: SessionItem) => void;
   onLoadChildren?: (
@@ -93,6 +95,7 @@ type ProjectSessionListProps = {
   onSearchToggle?: () => void;
   onSelect?: (session: SessionItem) => void;
   onSync?: (session: SessionItem) => Promise<void> | void;
+  onPin?: (session: SessionItem, pinned: boolean) => Promise<boolean> | boolean;
   onRename?: (session: SessionItem, nextName: string) => Promise<boolean> | boolean;
   onDelete?: (session: SessionItem) => void;
   onProjectClick?: (rootId: string) => void;
@@ -307,6 +310,7 @@ export function SessionList({
   syncingSessionKeys,
   onSelect,
   onSync,
+  onPin,
   onRename,
   onDelete,
   onLoadChildren,
@@ -684,6 +688,7 @@ export function SessionList({
                   childCount={childCountByParent.get(session.key) || 0}
                   onSelect={onSelect}
                   onSync={onSync}
+                  onPin={onPin}
                   onRename={onRename}
                   onDelete={onDelete}
                 />
@@ -736,6 +741,7 @@ export function MultiProjectSessionList({
   onSearchToggle,
   onSelect,
   onSync,
+  onPin,
   onRename,
   onDelete,
   onProjectClick,
@@ -1155,6 +1161,7 @@ export function MultiProjectSessionList({
                           childCount={childCountByParent.get(session.key) || 0}
                           onSelect={onSelect}
                           onSync={onSync}
+                          onPin={onPin}
                           onRename={onRename}
                           onDelete={onDelete}
                         />
@@ -1210,6 +1217,7 @@ function SessionCard({
   childCount = 0,
   onSelect,
   onSync,
+  onPin,
   onRename,
   onDelete,
 }: {
@@ -1222,11 +1230,13 @@ function SessionCard({
   childCount?: number;
   onSelect?: (session: SessionItem) => void;
   onSync?: (session: SessionItem) => Promise<void> | void;
+  onPin?: (session: SessionItem, pinned: boolean) => Promise<boolean> | boolean;
   onRename?: (session: SessionItem, nextName: string) => Promise<boolean> | boolean;
   onDelete?: (session: SessionItem) => void;
 }) {
   const { locale, t } = useI18n();
   const isClosed = !!session.closed_at;
+  const isPinned = !!session.pinned_at;
   const isSubagent = !!session.parent_session_key;
   const forkSource = parseForkSessionSource(session.source);
   const isForkSession = !!forkSource;
@@ -1718,6 +1728,7 @@ function SessionCard({
             justifyContent: "center",
             cursor: "pointer",
             outline: "none",
+            position: "relative",
           }}
         >
           <svg
@@ -1731,6 +1742,30 @@ function SessionCard({
             <circle cx="12" cy="12" r="1.8" />
             <circle cx="12" cy="19" r="1.8" />
           </svg>
+          {isPinned ? (
+            <span
+              aria-hidden="true"
+              style={{
+                position: "absolute",
+                top: "1px",
+                right: "1px",
+                width: "12px",
+                height: "12px",
+                borderRadius: "999px",
+                background: "var(--menu-bg)",
+                color: selected ? "var(--accent-color)" : "var(--text-secondary)",
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                pointerEvents: "none",
+                boxShadow: "0 0 0 1px var(--content-bg, #fff)",
+              }}
+            >
+              <span style={{ width: "9px", height: "9px", display: "inline-flex" }}>
+                <PinIcon pinned />
+              </span>
+            </span>
+          ) : null}
         </button>
         {menuOpen ? (
           <div
@@ -1747,6 +1782,23 @@ function SessionCard({
               zIndex: 20,
             }}
           >
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setMenuOpen(false);
+                void onPin?.(session, !isPinned);
+              }}
+              style={{
+                ...menuItemStyle,
+                color: "var(--text-primary)",
+              }}
+            >
+              <span style={{ width: "13px", height: "13px", display: "inline-flex" }}>
+                <PinIcon pinned={isPinned} />
+              </span>
+              {isPinned ? t("sessionList.unpin") : t("sessionList.pin")}
+            </button>
             <button
               type="button"
               disabled={syncing}

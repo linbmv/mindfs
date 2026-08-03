@@ -32,7 +32,7 @@ const (
 	exchangeFileTpl  = "sessions/%s.jsonl"
 	auxFileTpl       = "sessions/%s.aux.jsonl"
 	selectSessionSQL = `
-	SELECT key, type, parent_session_key, parent_tool_call_id, source, task_id, working_dir, model, shell, plan_mode, name, related_files_json, related_worktree_json, created_at, updated_at, closed_at
+	SELECT key, type, parent_session_key, parent_tool_call_id, source, task_id, working_dir, model, shell, plan_mode, name, related_files_json, related_worktree_json, last_context_window_total_tokens, last_context_window_model_context_window, pinned_at, created_at, updated_at, closed_at
 	FROM sessions`
 	deleteSessionSQL = `
 DELETE FROM sessions
@@ -45,21 +45,24 @@ DELETE FROM session_agent_bindings
 WHERE agent = ?`
 	upsertSessionMetaSQL = `
 INSERT INTO sessions (
-		key, type, parent_session_key, parent_tool_call_id, source, task_id, working_dir, model, shell, plan_mode, name, related_files_json, related_worktree_json, created_at, updated_at, closed_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		key, type, parent_session_key, parent_tool_call_id, source, task_id, working_dir, model, shell, plan_mode, name, related_files_json, related_worktree_json, last_context_window_total_tokens, last_context_window_model_context_window, pinned_at, created_at, updated_at, closed_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(key) DO UPDATE SET
 	type = excluded.type,
 	parent_session_key = excluded.parent_session_key,
-		parent_tool_call_id = excluded.parent_tool_call_id,
-		source = excluded.source,
-		task_id = excluded.task_id,
-		working_dir = excluded.working_dir,
-		model = excluded.model,
-		shell = excluded.shell,
-		plan_mode = excluded.plan_mode,
-		name = excluded.name,
+	parent_tool_call_id = excluded.parent_tool_call_id,
+	source = excluded.source,
+	task_id = excluded.task_id,
+	working_dir = excluded.working_dir,
+	model = excluded.model,
+	shell = excluded.shell,
+	plan_mode = excluded.plan_mode,
+	name = excluded.name,
 	related_files_json = excluded.related_files_json,
 	related_worktree_json = excluded.related_worktree_json,
+	last_context_window_total_tokens = excluded.last_context_window_total_tokens,
+	last_context_window_model_context_window = excluded.last_context_window_model_context_window,
+	pinned_at = excluded.pinned_at,
 	created_at = excluded.created_at,
 	updated_at = excluded.updated_at,
 	closed_at = excluded.closed_at`
@@ -72,12 +75,15 @@ CREATE TABLE IF NOT EXISTS sessions (
 	source TEXT NOT NULL DEFAULT '',
 	task_id TEXT NOT NULL DEFAULT '',
 	working_dir TEXT NOT NULL DEFAULT '',
-		model TEXT NOT NULL DEFAULT '',
-		shell TEXT NOT NULL DEFAULT '',
-		plan_mode INTEGER NOT NULL DEFAULT 0,
-		name TEXT NOT NULL,
+	model TEXT NOT NULL DEFAULT '',
+	shell TEXT NOT NULL DEFAULT '',
+	plan_mode INTEGER NOT NULL DEFAULT 0,
+	name TEXT NOT NULL,
 	related_files_json TEXT NOT NULL,
 	related_worktree_json TEXT NOT NULL DEFAULT '',
+	last_context_window_total_tokens INTEGER NOT NULL DEFAULT 0,
+	last_context_window_model_context_window INTEGER NOT NULL DEFAULT 0,
+	pinned_at TEXT,
 	created_at TEXT NOT NULL,
 	updated_at TEXT NOT NULL,
 	closed_at TEXT
@@ -387,6 +393,12 @@ func (m *Manager) List(_ context.Context, opts ListOptions) ([]*Session, error) 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.listSessionsUnsafe(opts)
+}
+
+func (m *Manager) ListPinned(_ context.Context, opts ListOptions) ([]*Session, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.listPinnedSessionsUnsafe(opts)
 }
 
 func (m *Manager) Count(_ context.Context, opts ListOptions) (int, error) {
@@ -938,6 +950,31 @@ func (m *Manager) Rename(_ context.Context, key, name string) (*Session, error) 
 	return session, nil
 }
 
+func (m *Manager) SetPinned(_ context.Context, key string, pinned bool) (*Session, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	session, err := m.getSessionUnsafe(key, 0)
+	if err != nil {
+		return nil, err
+	}
+	if pinned {
+		if session.PinnedAt != nil {
+			return session, nil
+		}
+		now := m.now().UTC()
+		session.PinnedAt = &now
+	} else {
+		if session.PinnedAt == nil {
+			return session, nil
+		}
+		session.PinnedAt = nil
+	}
+	if err := m.upsertSessionMetaUnsafe(session); err != nil {
+		return nil, err
+	}
+	return session, nil
+}
+
 func (m *Manager) UpdateModel(_ context.Context, session *Session, model string) error {
 	if session == nil || strings.TrimSpace(session.Key) == "" {
 		return errors.New("session required")
@@ -996,6 +1033,28 @@ func (m *Manager) UpdatePlanMode(_ context.Context, session *Session, enabled bo
 	current.UpdatedAt = m.now().UTC()
 	session.PlanMode = enabled
 	session.UpdatedAt = current.UpdatedAt
+	return m.upsertSessionMetaUnsafe(current)
+}
+
+func (m *Manager) UpdateLastContextWindow(_ context.Context, session *Session, contextWindow agenttypes.ContextWindow) error {
+	if session == nil || strings.TrimSpace(session.Key) == "" {
+		return errors.New("session required")
+	}
+	if !validContextWindow(contextWindow) {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	current, err := m.getSessionUnsafe(session.Key, 0)
+	if err != nil {
+		return err
+	}
+	if current.LastContextWindow == contextWindow {
+		session.LastContextWindow = contextWindow
+		return nil
+	}
+	current.LastContextWindow = contextWindow
+	session.LastContextWindow = contextWindow
 	return m.upsertSessionMetaUnsafe(current)
 }
 
@@ -1264,6 +1323,52 @@ LIMIT ?`
 	for rows.Next() {
 		var key string
 		if err := rows.Scan(&key); err != nil {
+			return nil, err
+		}
+		keys = append(keys, key)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	items := make([]*Session, 0, len(keys))
+	for _, key := range keys {
+		session, err := m.getSessionUnsafe(key, 0)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, session)
+	}
+	return items, nil
+}
+
+func (m *Manager) listPinnedSessionsUnsafe(opts ListOptions) ([]*Session, error) {
+	db, err := m.ensureSessionMetaDBUnsafe()
+	if err != nil {
+		return nil, err
+	}
+	query := `
+SELECT key FROM sessions`
+	where, args := sessionListWhere(ListOptions{
+		ParentSessionKey: opts.ParentSessionKey,
+		TopLevelOnly:     opts.TopLevelOnly,
+	})
+	where = append(where, "pinned_at IS NOT NULL AND pinned_at != ''")
+	if len(where) > 0 {
+		query += `
+WHERE ` + strings.Join(where, " AND ")
+	}
+	query += `
+ORDER BY pinned_at DESC, updated_at DESC`
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	keys := make([]string, 0)
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			rows.Close()
 			return nil, err
 		}
 		keys = append(keys, key)
@@ -1686,6 +1791,9 @@ func openSessionMetaDB(dbFile string) (db *sql.DB, err error) {
 		`ALTER TABLE sessions ADD COLUMN task_id TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE sessions ADD COLUMN working_dir TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE sessions ADD COLUMN related_worktree_json TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE sessions ADD COLUMN last_context_window_total_tokens INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE sessions ADD COLUMN last_context_window_model_context_window INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE sessions ADD COLUMN pinned_at TEXT`,
 	} {
 		if _, err := db.Exec(stmt); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
 			db.Close()
@@ -1758,6 +1866,10 @@ func sessionMetaUpsertArgs(session *Session) ([]any, error) {
 	if session.ClosedAt != nil {
 		closedAt = session.ClosedAt.UTC().Format(time.RFC3339Nano)
 	}
+	var pinnedAt any
+	if session.PinnedAt != nil {
+		pinnedAt = session.PinnedAt.UTC().Format(time.RFC3339Nano)
+	}
 	return []any{
 		session.Key,
 		session.Type,
@@ -1772,10 +1884,17 @@ func sessionMetaUpsertArgs(session *Session) ([]any, error) {
 		session.Name,
 		string(relatedFilesJSON),
 		relatedWorktreeJSON,
+		session.LastContextWindow.TotalTokens,
+		session.LastContextWindow.ModelContextWindow,
+		pinnedAt,
 		session.CreatedAt.UTC().Format(time.RFC3339Nano),
 		session.UpdatedAt.UTC().Format(time.RFC3339Nano),
 		closedAt,
 	}, nil
+}
+
+func validContextWindow(contextWindow agenttypes.ContextWindow) bool {
+	return contextWindow.TotalTokens > 0 && contextWindow.ModelContextWindow > 0
 }
 
 func boolToSQLiteInt(value bool) int {
@@ -1804,6 +1923,9 @@ func scanSessionMetaRow(scanner rowScanner) (*Session, error) {
 		name                string
 		relatedFilesJSON    string
 		relatedWorktreeJSON string
+		contextTotalTokens  int
+		contextModelWindow  int
+		pinnedAtRaw         sql.NullString
 		createdAtRaw        string
 		updatedAtRaw        string
 		closedAtRaw         sql.NullString
@@ -1822,6 +1944,9 @@ func scanSessionMetaRow(scanner rowScanner) (*Session, error) {
 		&name,
 		&relatedFilesJSON,
 		&relatedWorktreeJSON,
+		&contextTotalTokens,
+		&contextModelWindow,
+		&pinnedAtRaw,
 		&createdAtRaw,
 		&updatedAtRaw,
 		&closedAtRaw,
@@ -1842,6 +1967,10 @@ func scanSessionMetaRow(scanner rowScanner) (*Session, error) {
 		Name:             name,
 		Exchanges:        []Exchange{},
 		RelatedFiles:     []RelatedFile{},
+		LastContextWindow: agenttypes.ContextWindow{
+			TotalTokens:        contextTotalTokens,
+			ModelContextWindow: contextModelWindow,
+		},
 	}
 	if strings.TrimSpace(relatedFilesJSON) != "" {
 		if err := json.Unmarshal([]byte(relatedFilesJSON), &session.RelatedFiles); err != nil {
@@ -1864,6 +1993,12 @@ func scanSessionMetaRow(scanner rowScanner) (*Session, error) {
 	}
 	session.CreatedAt = createdAt
 	session.UpdatedAt = updatedAt
+	if pinnedAtRaw.Valid && strings.TrimSpace(pinnedAtRaw.String) != "" {
+		pinnedAt, err := time.Parse(time.RFC3339Nano, pinnedAtRaw.String)
+		if err == nil {
+			session.PinnedAt = &pinnedAt
+		}
+	}
 	if closedAtRaw.Valid && strings.TrimSpace(closedAtRaw.String) != "" {
 		closedAt, err := time.Parse(time.RFC3339Nano, closedAtRaw.String)
 		if err == nil {

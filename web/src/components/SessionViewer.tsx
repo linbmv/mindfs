@@ -14,6 +14,7 @@ import { rootBadgeButtonStyle } from "./rootBadgeStyle";
 import { copyText } from "../services/clipboard";
 import type { AgentStatus } from "../services/agents";
 import { useI18n, type Locale } from "../i18n";
+import { formatSessionDuration } from "../services/sessionDuration";
 
 type SessionItem = {
   key?: string;
@@ -325,6 +326,16 @@ function ContextWindowBadge({
       </span>
     </span>
   );
+}
+
+function previousUserTimestamp(timeline: TimelineItem[], index: number): string {
+  for (let i = index - 1; i >= 0; i -= 1) {
+    const item = timeline[i];
+    if (item.type === "user_text") {
+      return item.timestamp || "";
+    }
+  }
+  return "";
 }
 
 const formatTime = (isoString: string | undefined, locale: Locale) => {
@@ -953,35 +964,6 @@ function timelineItemSpacing(
     return "6px";
   }
   return "16px";
-}
-
-function collectAssistantFlowMarkdown(
-  timeline: TimelineItem[],
-  startIndex: number,
-): string {
-  const segments: string[] = [];
-
-  for (let index = startIndex; index >= 0; index -= 1) {
-    const item = timeline[index];
-    if (item.type === "user_text") {
-      break;
-    }
-    if (item.type === "assistant_text" && item.content) {
-      segments.unshift(item.content);
-    }
-  }
-
-  for (let index = startIndex + 1; index < timeline.length; index += 1) {
-    const item = timeline[index];
-    if (item.type === "user_text") {
-      break;
-    }
-    if (item.type === "assistant_text" && item.content) {
-      segments.push(item.content);
-    }
-  }
-
-  return segments.join("").trim();
 }
 
 function shouldDefaultCollapseRelatedFiles(
@@ -1720,11 +1702,12 @@ if (useInnerScrollContainer && !container) {
     const userMessageWidth =
       imageAttachments.length > 0 ? "min(320px, 100%)" : "auto";
     const hasRichUserAttachments = imageAttachments.length > 0;
-    const assistantMarkdownContent = !isUser
-      ? collectAssistantFlowMarkdown(timeline, idx)
-      : "";
+    const assistantMarkdownContent = !isUser ? (item.content || "").trim() : "";
     const assistantExchangeMeta = !isUser
       ? formatAssistantExchangeMeta(item, agents)
+      : "";
+    const assistantDurationLabel = !isUser
+      ? formatSessionDuration(previousUserTimestamp(timeline, idx), item.timestamp)
       : "";
     const canForkAgentMessage = !isUser && Number(item.seq || 0) > 0 && !!onForkAgentMessage;
     return (
@@ -2149,7 +2132,7 @@ if (useInnerScrollContainer && !container) {
                 {assistantExchangeMeta ? (
                   <span>{assistantExchangeMeta}</span>
                 ) : null}
-                <span>{time}</span>
+                <span>{time}{assistantDurationLabel ? ` ${assistantDurationLabel}` : ""}</span>
                 <ContextWindowBadge contextWindow={item.contextWindow} />
               </span>
             )}

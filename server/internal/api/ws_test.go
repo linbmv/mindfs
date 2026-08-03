@@ -12,6 +12,7 @@ import (
 	"mindfs/server/internal/agent"
 	agenttypes "mindfs/server/internal/agent/types"
 	"mindfs/server/internal/e2ee"
+	"mindfs/server/internal/session"
 )
 
 func TestParseClientContext(t *testing.T) {
@@ -107,6 +108,27 @@ func TestSessionMessageContextUsesAgentPoolLifecycle(t *testing.T) {
 	case <-ctx.Done():
 	default:
 		t.Fatal("expected session message context to be canceled when agent pool closes")
+	}
+}
+
+func TestSessionRuntimeRootPathUsesRelatedWorktree(t *testing.T) {
+	current := &session.Session{
+		Source: "worktree",
+		RelatedWorktree: &session.RelatedWorktree{
+			Path: "  /tmp/project-worktree  ",
+		},
+	}
+	if got := sessionRuntimeRootPath(current); got != "/tmp/project-worktree" {
+		t.Fatalf("sessionRuntimeRootPath() = %q, want %q", got, "/tmp/project-worktree")
+	}
+	if got := sessionRuntimeRootPath(&session.Session{}); got != "" {
+		t.Fatalf("sessionRuntimeRootPath() without worktree = %q, want empty", got)
+	}
+	relatedOnly := &session.Session{
+		RelatedWorktree: &session.RelatedWorktree{Path: "/tmp/observed-worktree"},
+	}
+	if got := sessionRuntimeRootPath(relatedOnly); got != "" {
+		t.Fatalf("sessionRuntimeRootPath() for incidental relation = %q, want empty", got)
 	}
 }
 
@@ -228,6 +250,45 @@ func TestStreamHubUnfreezeQueueAllowsAutomaticPop(t *testing.T) {
 	}
 	if len(queue) != 0 {
 		t.Fatalf("expected empty queue, got %#v", queue)
+	}
+}
+
+func TestStreamHubSetPendingUserAtUsesProvidedTimestamp(t *testing.T) {
+	hub := NewStreamHub(nil)
+	want := time.Date(2026, 7, 29, 10, 0, 0, int(456*time.Millisecond), time.UTC)
+
+	pending := hub.SetPendingUserAt("root", "session", "Session", "codex", "gpt-test", "", "", "", false, "hello", want)
+
+	if pending == nil {
+		t.Fatal("SetPendingUserAt returned nil")
+	}
+	if !pending.Timestamp.Equal(want) {
+		t.Fatalf("pending timestamp = %s, want %s", pending.Timestamp.Format(time.RFC3339Nano), want.Format(time.RFC3339Nano))
+	}
+	exchange := hub.GetPendingUserExchange("session")
+	if exchange == nil {
+		t.Fatal("pending exchange is nil")
+	}
+	if !exchange.Timestamp.Equal(want) {
+		t.Fatalf("exchange timestamp = %s, want %s", exchange.Timestamp.Format(time.RFC3339Nano), want.Format(time.RFC3339Nano))
+	}
+}
+
+func TestReserveClientRequestKeepsOriginalTimestamp(t *testing.T) {
+	handler := &WSHandler{}
+
+	firstTimestamp, firstReserved := handler.reserveClientRequest("request-1")
+	time.Sleep(time.Millisecond)
+	secondTimestamp, secondReserved := handler.reserveClientRequest("request-1")
+
+	if !firstReserved {
+		t.Fatal("first request was not reserved")
+	}
+	if secondReserved {
+		t.Fatal("duplicate request was reserved again")
+	}
+	if !secondTimestamp.Equal(firstTimestamp) {
+		t.Fatalf("duplicate timestamp = %s, want %s", secondTimestamp.Format(time.RFC3339Nano), firstTimestamp.Format(time.RFC3339Nano))
 	}
 }
 
