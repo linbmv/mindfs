@@ -45,6 +45,7 @@
   "devDependencies": {
     "@capacitor/cli": "^8.3.1",
     "@tailwindcss/vite": "^4.2.1",
+    "@types/diff": "^7.0.2",
     "@types/prismjs": "^1.26.6",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
