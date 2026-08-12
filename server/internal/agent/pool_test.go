@@ -324,6 +324,41 @@ func TestMergeConfigsKeepsBundledAgentsAndAppliesUserOverrides(t *testing.T) {
 	}
 }
 
+func TestConfigFiltersDisabledCursorAgent(t *testing.T) {
+	cfg, err := DecodeConfig([]byte(`{
+  "agents": [
+    {"name":"cursor","command":"cursor-agent","protocol":"acp"},
+    {"name":"renamed-cursor","command":"cursor-agent","protocol":"acp"},
+    {"name":"codex","command":"codex","protocol":"codex-sdk"}
+  ]
+}`))
+	if err != nil {
+		t.Fatalf("DecodeConfig failed: %v", err)
+	}
+	if _, ok := cfg.GetAgent("cursor"); ok {
+		t.Fatalf("disabled cursor agent should not be configured")
+	}
+	if _, ok := cfg.GetAgent("renamed-cursor"); ok {
+		t.Fatalf("cursor-agent command should be disabled even under another name")
+	}
+	if _, ok := cfg.GetAgent("codex"); !ok {
+		t.Fatalf("unrelated agent should remain configured")
+	}
+}
+
+func TestMergeHostedConfigFiltersDisabledCursorAgent(t *testing.T) {
+	cfg := MergeHostedConfig(
+		Config{Agents: []Definition{{Name: "cursor", Command: "cursor-agent", Protocol: ProtocolACP}}},
+		Config{Agents: []Definition{{Name: "codex", Command: "codex", Protocol: ProtocolCodexSDK}}},
+	)
+	if _, ok := cfg.GetAgent("cursor"); ok {
+		t.Fatalf("hosted cursor agent should not enter effective config")
+	}
+	if _, ok := cfg.GetAgent("codex"); !ok {
+		t.Fatalf("local codex agent should remain configured")
+	}
+}
+
 func TestLoadConfigFiltersLifecycleCommandsByOS(t *testing.T) {
 	tempDir := t.TempDir()
 	configPath := filepath.Join(tempDir, "agents.json")

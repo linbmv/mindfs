@@ -1256,21 +1256,6 @@ export function ActionBar({
   const showCancel = !!currentSession?.pending && !!currentSession?.key && !hasDraft;
   const isModeLocked = !!currentSession;
 
-  useEffect(() => {
-    if (isMobile || !showCancel) {
-      return;
-    }
-    const cancelOnEscape = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || event.key !== "Escape" || isCompositionActive(event) || event.repeat) {
-        return;
-      }
-      event.preventDefault();
-      void handleCancel();
-    };
-    window.addEventListener("keydown", cancelOnEscape);
-    return () => window.removeEventListener("keydown", cancelOnEscape);
-  }, [handleCancel, isCompositionActive, isMobile, showCancel]);
-
   const inputPlaceholder = currentSession && !currentSession.pending
     ? t("action.placeholder.newSessionSwipe")
     : mode === "chat" && !isFocused

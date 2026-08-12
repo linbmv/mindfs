@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # MindFS installer for macOS and Linux.
 # Downloads the correct release from GitHub and installs it.
-# Usage:  bash install.sh [--version VERSION] [--prefix PREFIX] [--uninstall] [--purge]
+# Usage:  bash install.sh [--version VERSION] [--prefix PREFIX] [--repo OWNER/REPO] [--uninstall] [--purge]
 set -euo pipefail
 
-REPO="a9gent/mindfs"
+REPO="${MINDFS_REPO:-a9gent/mindfs}"
 RELEASE_NOTES_URL="https://raw.githubusercontent.com/${REPO}/main/release-notes.md"
 RELAY_DOWNLOAD_BASE="https://relay.a9gent.com/mindfs-downloads"
 VERSION=""
@@ -17,6 +17,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --version)  VERSION="$2";  shift 2 ;;
     --prefix)   PREFIX="$2";   shift 2 ;;
+    --repo)     REPO="$2"; RELEASE_NOTES_URL="https://raw.githubusercontent.com/${REPO}/main/release-notes.md"; shift 2 ;;
     --uninstall) UNINSTALL=1; shift ;;
     --purge) PURGE=1; shift ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
@@ -170,6 +171,10 @@ download_file() {
 
 echo "  Downloading ${URL}"
 if ! download_file "$URL" "${TMPDIR}/${FILENAME}"; then
+  if [[ "$REPO" != "a9gent/mindfs" ]]; then
+    echo "Error: GitHub download failed for custom repository ${REPO}." >&2
+    exit 1
+  fi
   echo "  GitHub download failed; trying ${FALLBACK_URL}"
   rm -f "${TMPDIR}/${FILENAME}"
   download_file "$FALLBACK_URL" "${TMPDIR}/${FILENAME}"

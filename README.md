@@ -170,6 +170,40 @@ cd mindfs
 make build      # output: ./mindfs
 ```
 
+### One-command deployment on a fresh VPS
+
+On a Debian/Ubuntu VPS, deploy without relying on the current checkout directory and without Docker, Node.js, or Go:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/a9gent/mindfs/main/scripts/deploy-vps.sh | sudo bash -s --
+```
+
+The script installs the binary under `/opt/mindfs`, creates an isolated `mindfs` system user and `mindfs.service`, stores persistent state under `/var/lib/mindfs`, and manages `/var/lib/mindfs/workspace` as the initial project root. It listens on `0.0.0.0:7331` with self-signed HTTPS and E2EE pairing enabled by default.
+
+Use independent paths or keep the service private behind an SSH tunnel:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/a9gent/mindfs/main/scripts/deploy-vps.sh \
+  | sudo bash -s -- \
+    --data-dir /srv/mindfs/data \
+    --project-dir /srv/mindfs/workspace \
+    --private
+```
+
+The script prints the HTTPS URL and E2EE pairing code after startup. Accept the self-signed certificate once, then enter the pairing code. Public access also requires TCP `7331` in the VPS provider firewall; `--open-firewall` adds the port to an existing UFW configuration. For production, prefer an HTTPS reverse proxy, Tailscale, or Relay.
+
+The script detects whether systemd is actually running. In containers, Distrobox, or minimal systems without systemd, it falls back to a managed background process and creates `/opt/mindfs/bin/mindfs-service` with `start`, `stop`, `restart`, `status`, and `logs` commands. This mode does not auto-start after the host reboots; use `--no-systemd` explicitly or configure restart behavior in the container/orchestration layer.
+
+Useful commands:
+
+```bash
+systemctl status mindfs
+journalctl -u mindfs -f
+systemctl restart mindfs
+```
+
+This deploys MindFS only; it does not install an Agent CLI or configure provider credentials. Use `--dry-run` to inspect the plan before changing the VPS.
+
 ### Run
 
 ```bash

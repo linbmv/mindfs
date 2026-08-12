@@ -172,6 +172,46 @@ cd mindfs
 make build      # 产物为 ./mindfs
 ```
 
+### 全新 VPS 一键部署
+
+Debian/Ubuntu VPS 可以直接使用下面的脚本部署，不需要当前仓库目录，也不需要 Docker、Node.js 或 Go：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/a9gent/mindfs/main/scripts/deploy-vps.sh | sudo bash -s --
+```
+
+脚本默认会：
+
+- 将二进制安装到 `/opt/mindfs`；
+- 使用独立的 `mindfs` 系统用户运行 `mindfs.service`；
+- 将配置、注册表、运行状态和 E2EE 密钥保存到 `/var/lib/mindfs`；
+- 将 `/var/lib/mindfs/workspace` 作为初始托管目录；
+- 监听 `0.0.0.0:7331`，并开启自签名 HTTPS 和 E2EE 配对保护。
+
+自定义路径或仅通过 SSH 隧道访问：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/a9gent/mindfs/main/scripts/deploy-vps.sh \
+  | sudo bash -s -- \
+    --data-dir /srv/mindfs/data \
+    --project-dir /srv/mindfs/workspace \
+    --private
+```
+
+部署完成后，终端会显示 HTTPS 地址和 E2EE 配对码；首次打开自签名证书地址时需要在浏览器中确认证书，再输入配对码。公网直连还需要在 VPS 云防火墙放行 TCP `7331`，也可以追加 `--open-firewall` 写入已有的 UFW 规则。生产环境建议在 HTTPS 反向代理、Tailscale 或 Relay 后使用。
+
+脚本会自动判断 systemd 是否真正运行。在容器、Distrobox 或精简系统中没有 systemd 时，会退回到后台进程模式，并生成 `/opt/mindfs/bin/mindfs-service`，可用 `start`、`stop`、`restart`、`status`、`logs` 管理。该模式不会在宿主机重启后自动拉起；可显式使用 `--no-systemd`，或在容器编排层配置自动重启。
+
+常用运维命令：
+
+```bash
+systemctl status mindfs
+journalctl -u mindfs -f
+systemctl restart mindfs
+```
+
+该脚本只部署 MindFS，不会替你安装 Claude/Codex 等 Agent CLI 或配置 API 凭据；这些程序和凭据必须对 `mindfs` 服务用户可见。使用 `--dry-run` 可先查看部署计划。
+
 ### 启动
 
 ```bash

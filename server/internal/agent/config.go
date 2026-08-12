@@ -13,6 +13,34 @@ import (
 
 const configPathEnvKey = "MINDFS_AGENTS_CONFIG"
 
+// Cursor is intentionally disabled for this deployment. Hosted agent
+// definitions are refreshed from the relay and merged with local definitions,
+// so removing Cursor from one local agents.json is not sufficient to keep it
+// out of the effective runtime catalog.
+func isDisabledAgent(def Definition) bool {
+	name := strings.ToLower(strings.TrimSpace(def.Name))
+	if name == "cursor" {
+		return true
+	}
+	command := strings.ToLower(strings.TrimSpace(filepath.Base(strings.TrimSpace(def.Command))))
+	return command == "cursor-agent" || command == "cursor-agent.exe"
+}
+
+func filterDisabledAgents(cfg Config) Config {
+	if len(cfg.Agents) == 0 {
+		return cfg
+	}
+	filtered := make([]Definition, 0, len(cfg.Agents))
+	for _, def := range cfg.Agents {
+		if isDisabledAgent(def) {
+			continue
+		}
+		filtered = append(filtered, def)
+	}
+	cfg.Agents = filtered
+	return cfg
+}
+
 // Config holds all agent configurations.
 type Config struct {
 	Agents          []Definition `json:"agents"`
@@ -239,6 +267,7 @@ func normalizeConfig(cfg Config) (Config, error) {
 		cfg.Agents[i].InstallCommands = normalizeCommandList(cfg.Agents[i].InstallCommands)
 		cfg.Agents[i].UpdateCommands = normalizeCommandList(cfg.Agents[i].UpdateCommands)
 	}
+	cfg = filterDisabledAgents(cfg)
 	return cfg, nil
 }
 
@@ -284,7 +313,7 @@ func mergeConfigs(base Config, override Config) Config {
 		agentIndexes[agent.Name] = len(merged.Agents)
 		merged.Agents = append(merged.Agents, agent)
 	}
-	return merged
+	return filterDisabledAgents(merged)
 }
 
 func mergeAgentDefinition(base Definition, override Definition) Definition {
