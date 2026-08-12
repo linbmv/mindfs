@@ -194,6 +194,30 @@ The script prints the HTTPS URL and E2EE pairing code after startup. Accept the 
 
 The script detects whether systemd is actually running. In containers, Distrobox, or minimal systems without systemd, it falls back to a managed background process and creates `/opt/mindfs/bin/mindfs-service` with `start`, `stop`, `restart`, `status`, and `logs` commands. This mode does not auto-start after the host reboots; use `--no-systemd` explicitly or configure restart behavior in the container/orchestration layer.
 
+### One-command VPS migration
+
+Use the same script on both machines. On the old VPS it stops MindFS briefly, backs up conversations, project metadata, E2EE/TLS/Relay configuration, and the `mindfs` user's Codex/Claude data, then starts the service again. On the new VPS it verifies the archive, shows the path migration plan, moves existing target data to a rollback directory, installs MindFS, restores the data, rewrites absolute project/session paths, and checks `/health`.
+
+Old VPS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/linbmv/mindfs/custom/mindfs-local/scripts/migrate-vps.sh \
+  | sudo bash -s -- backup --encrypt
+```
+
+Copy both the `.tar.gz.gpg` archive and its `.sha256` file to the new VPS. Then run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/linbmv/mindfs/custom/mindfs-local/scripts/migrate-vps.sh \
+  | sudo bash -s -- restore \
+      --archive /root/mindfs-backups/mindfs-migration-YYYYMMDDTHHMMSSZ.tar.gz.gpg \
+      --yes
+```
+
+For a preview without changing the new VPS, replace `--yes` with `--dry-run`. Use `--projects-dir /srv/mindfs/projects` when external project roots should be placed in a specific directory. The restore keeps the source runtime settings by default; `--port`, `--private`, `--no-relayer`, `--no-tls`, and `--no-e2ee` override them. Existing target data is retained under `/var/backups/mindfs-restore-<timestamp>` until you verify the result.
+
+The archive contains API credentials, Relay credentials, E2EE pairing keys, TLS private keys, and agent session data. Keep it outside GitHub, transfer it over SSH, restrict it to root, and remove it only after verifying the restored conversations and agents. GPG prompts for the encryption passphrase on backup and restore.
+
 Useful commands:
 
 ```bash

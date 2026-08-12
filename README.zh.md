@@ -202,6 +202,30 @@ curl -fsSL https://raw.githubusercontent.com/a9gent/mindfs/main/scripts/deploy-v
 
 脚本会自动判断 systemd 是否真正运行。在容器、Distrobox 或精简系统中没有 systemd 时，会退回到后台进程模式，并生成 `/opt/mindfs/bin/mindfs-service`，可用 `start`、`stop`、`restart`、`status`、`logs` 管理。该模式不会在宿主机重启后自动拉起；可显式使用 `--no-systemd`，或在容器编排层配置自动重启。
 
+### VPS 一键迁移
+
+两台机器使用同一个脚本：旧 VPS 执行 `backup`，新 VPS 执行 `restore`。备份会短暂停止 MindFS，保存对话、项目元数据、E2EE/TLS/Relay 配置，以及 `mindfs` 用户的 Codex/Claude 数据；恢复会校验归档、显示路径迁移计划，把新 VPS 原有数据移动到回滚目录，安装 MindFS，恢复数据并改写绝对项目/会话路径，最后检查 `/health`。
+
+旧 VPS：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/linbmv/mindfs/custom/mindfs-local/scripts/migrate-vps.sh \
+  | sudo bash -s -- backup --encrypt
+```
+
+将生成的 `.tar.gz.gpg` 和旁边的 `.sha256` 一起复制到新 VPS，然后执行：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/linbmv/mindfs/custom/mindfs-local/scripts/migrate-vps.sh \
+  | sudo bash -s -- restore \
+      --archive /root/mindfs-backups/mindfs-migration-YYYYMMDDTHHMMSSZ.tar.gz.gpg \
+      --yes
+```
+
+只预览而不修改新 VPS 时，把 `--yes` 换成 `--dry-run`。外部项目要放到指定目录时可追加 `--projects-dir /srv/mindfs/projects`。恢复默认沿用旧机运行参数；可用 `--port`、`--private`、`--no-relayer`、`--no-tls`、`--no-e2ee` 覆盖。新 VPS 原数据会保存在 `/var/backups/mindfs-restore-<时间戳>`，确认恢复无误后再清理。
+
+归档包含 API 凭据、Relay 凭据、E2EE 配对密钥、TLS 私钥和 Agent 会话数据。不要提交 GitHub，使用 SSH 传输并限制为 root 可读；确认对话和 Agent 均正常后再删除。备份和恢复时 GPG 会提示输入加密口令。
+
 常用运维命令：
 
 ```bash

@@ -28,6 +28,7 @@ NO_RELAYER="${MINDFS_NO_RELAYER:-0}"
 OPEN_FIREWALL="${MINDFS_OPEN_FIREWALL:-0}"
 INIT_MODE="${MINDFS_INIT_MODE:-auto}"
 DRY_RUN=0
+SKIP_START=0
 
 CONFIG_HOME="${DATA_DIR}/config"
 STATE_HOME="${DATA_DIR}/.local/share"
@@ -85,6 +86,7 @@ Options:
   --no-relayer            Disable Relay integration
   --open-firewall         Add PORT/tcp to an existing UFW configuration
   --dry-run               Print the deployment plan without changing the host
+  --skip-start            Install and configure without starting the service
   -h, --help              Show this help
 
 Environment equivalents use the MINDFS_ prefix, e.g. MINDFS_PROJECT_DIR.
@@ -160,6 +162,14 @@ parse_args() {
         ENABLE_TLS=0
         shift
         ;;
+      --tls)
+        ENABLE_TLS=1
+        shift
+        ;;
+      --e2ee)
+        ENABLE_E2EE=1
+        shift
+        ;;
       --no-e2ee)
         ENABLE_E2EE=0
         shift
@@ -174,6 +184,10 @@ parse_args() {
         ;;
       --dry-run)
         DRY_RUN=1
+        shift
+        ;;
+      --skip-start)
+        SKIP_START=1
         shift
         ;;
       -h|--help)
@@ -217,6 +231,7 @@ validate_config() {
   [[ "$ENABLE_E2EE" == 0 || "$ENABLE_E2EE" == 1 ]] || die "MINDFS_ENABLE_E2EE must be 0 or 1"
   [[ "$NO_RELAYER" == 0 || "$NO_RELAYER" == 1 ]] || die "MINDFS_NO_RELAYER must be 0 or 1"
   [[ "$OPEN_FIREWALL" == 0 || "$OPEN_FIREWALL" == 1 ]] || die "MINDFS_OPEN_FIREWALL must be 0 or 1"
+  [[ "$SKIP_START" == 0 || "$SKIP_START" == 1 ]] || die "SKIP_START must be 0 or 1"
   [[ "$INIT_MODE" == "auto" || "$INIT_MODE" == "systemd" || "$INIT_MODE" == "background" ]] || die "init mode must be auto, systemd, or background"
 
   if [[ "$ENABLE_E2EE" == 1 && "$ENABLE_TLS" == 0 ]]; then
@@ -302,6 +317,7 @@ Deployment plan (dry run)
   E2EE pairing:  ${ENABLE_E2EE}
   Relay:         $([[ "$NO_RELAYER" == 1 ]] && printf 'disabled' || printf 'enabled')
   UFW rule:      ${OPEN_FIREWALL}
+  Start service: $([[ "$SKIP_START" == 1 ]] && printf 'no' || printf 'yes')
 
 No files, packages, users, firewall rules, or systemd units will be changed.
 EOF
@@ -689,9 +705,15 @@ main() {
   else
     write_background_control_script
   fi
-  start_service
+  if [[ "$SKIP_START" == 0 ]]; then
+    start_service
+  else
+    log "Service files installed; start skipped"
+  fi
   configure_firewall
-  wait_for_health
+  if [[ "$SKIP_START" == 0 ]]; then
+    wait_for_health
+  fi
   print_summary
 }
 
