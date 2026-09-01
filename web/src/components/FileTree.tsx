@@ -18,6 +18,7 @@ import {
   type AppearanceMode,
 } from "../services/appearance";
 import { useI18n, type Locale, type MessageKey } from "../i18n";
+import { useRefreshSpin } from "../hooks";
 import { AgentIcon } from "./AgentIcon";
 import { SymlinkBadge } from "./SymlinkBadge";
 import { RelayLocalServicesDialog } from "./RelayLocalServicesDialog";
@@ -100,7 +101,7 @@ type RootSessionIndicator = {
   pending?: boolean;
 };
 
-type ProjectTreeTab = "files" | "git" | "worktrees" | "related";
+export type ProjectTreeTab = "files" | "git" | "worktrees" | "related";
 export type AgentConfigSwitchRequest = {
   nonce: number;
   flow?: "backup" | "switch";
@@ -140,6 +141,9 @@ type FileTreeProps = {
   projectTreeTabRequest?: { tab: ProjectTreeTab; nonce: number } | null;
   agentConfigSwitchRequest?: AgentConfigSwitchRequest | null;
   onProjectTreeTabChange?: (tab: ProjectTreeTab) => void;
+  onRefresh?: (tab: ProjectTreeTab) => void | Promise<void>;
+  onAgentConfigSwitched?: (agent: string) => void;
+  onStartOnboarding?: () => void;
   creatingRootName?: string | null;
   creatingRootBusy?: boolean;
   creatingRootExtraContent?: React.ReactNode;
@@ -208,6 +212,15 @@ const fileTreeMenuButtonStyle: React.CSSProperties = {
   cursor: "pointer",
   fontSize: "12px",
 };
+
+function OnboardingGuideIcon() {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" width="1em" height="1em" viewBox="0 0 2048 2048" aria-hidden="true">
+      <path d="M0 0h2048v2048H0z" fill="none" />
+      <path fill="currentColor" d="M2048 512v1536H0V512h517q-2-16-3-32t-2-32q0-93 35-174t96-143t142-96T960 0q93 0 174 35t143 96t96 142t35 175q0 16-1 32t-4 32zM960 128q-66 0-124 25t-102 69t-69 102t-25 124t25 124t68 102t102 69t125 25t124-25t101-68t69-102t26-125t-25-124t-69-101t-102-69t-124-26m960 512h-555q-25 52-62 97t-85 77q103 40 186 106t140 152t89 188t31 212v64h-128v-64q0-123-44-228t-121-183t-182-121t-229-44q-111 0-210 38t-176 107t-126 162t-61 205h648l-230-230l91-90l384 384l-384 384l-91-90l230-230H256v-64q0-110 31-211t90-187t141-152t185-107q-98-69-148-175H128v1280h1792z" />
+    </svg>
+  );
+}
 
 function NotificationIcon() {
   return (
@@ -1482,6 +1495,9 @@ export function FileTree({
   projectTreeTabRequest = null,
   agentConfigSwitchRequest = null,
   onProjectTreeTabChange,
+  onRefresh,
+  onAgentConfigSwitched,
+  onStartOnboarding,
   creatingRootName = null,
   creatingRootBusy = false,
   creatingRootExtraContent = null,
@@ -1537,6 +1553,16 @@ export function FileTree({
       return "files";
     }
   });
+  const handleTabRefresh = React.useCallback(
+    () => onRefresh?.(projectTreeTab),
+    [onRefresh, projectTreeTab],
+  );
+  const {
+    refreshing: treeRefreshing,
+    pressed: treePressed,
+    setPressed: setTreePressed,
+    handleClick: handleRefreshClick,
+  } = useRefreshSpin(handleTabRefresh);
   const [isAppearanceMenuOpen, setIsAppearanceMenuOpen] = React.useState(false);
   const [isLocaleMenuOpen, setIsLocaleMenuOpen] = React.useState(false);
   const [isSortMenuOpen, setIsSortMenuOpen] = React.useState(false);
@@ -2395,6 +2421,7 @@ export function FileTree({
       if (selection.type === "api_provider") {
         await switchAgentAPIProvider({ agent: agentConfigAgent, providerID: selection.id });
         closeAgentConfigFlow();
+        onAgentConfigSwitched?.(agentConfigAgent);
         return;
       }
       const result = await switchAgentConfig({ id: selection.id, confirmOverwrite });
@@ -2404,12 +2431,13 @@ export function FileTree({
         return;
       }
       closeAgentConfigFlow();
+      onAgentConfigSwitched?.(agentConfigAgent);
     } catch (error) {
       setAgentConfigError(error instanceof Error ? error.message : t("agentConfig.switchFailed"));
     } finally {
       setAgentConfigBusy(false);
     }
-  }, [agentConfigAgent, agentConfigSwitchSelection, closeAgentConfigFlow, t]);
+  }, [agentConfigAgent, agentConfigSwitchSelection, closeAgentConfigFlow, onAgentConfigSwitched, t]);
 
   const editAgentConfigBackup = React.useCallback(async (id: string) => {
     setAgentConfigBusy(true);
@@ -2899,8 +2927,8 @@ export function FileTree({
 
   return (
     <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-      <div style={{ position: "relative", height: "36px", padding: "0 3px", borderBottom: "1px solid var(--border-color)", display: "flex", justifyContent: "space-between", alignItems: "center", background: "var(--mindfs-topbar-bg, transparent)", boxSizing: "border-box", flexShrink: 0, gap: 6, overflow: "visible" }}>
-        <div style={{ display: "flex", alignItems: "center", minWidth: 0, flex: "1 1 auto", maxWidth: "calc(100% - 34px)" }}>
+      <div style={{ position: "relative", height: "36px", padding: "0 3px", borderBottom: "1px solid var(--border-color)", display: "flex", justifyContent: "space-between", alignItems: "center", background: "var(--mindfs-topbar-bg, transparent)", boxSizing: "border-box", flexShrink: 0, gap: 0, overflow: "visible" }}>
+        <div style={{ display: "flex", alignItems: "center", minWidth: 0, flex: "1 1 auto", maxWidth: "calc(100% - 56px)", marginRight: "6px" }}>
           <div
             role="tablist"
             aria-label={t("fileTree.projectTabs")}
@@ -2966,6 +2994,58 @@ export function FileTree({
             })}
           </div>
         </div>
+        <button
+          type="button"
+          data-onboarding="sidebar-refresh"
+          onClick={() => void handleRefreshClick()}
+          onMouseDown={() => setTreePressed(true)}
+          onMouseUp={() => setTreePressed(false)}
+          onMouseLeave={() => setTreePressed(false)}
+          aria-label={t("common.refresh")}
+          title={t("common.refresh")}
+          style={{
+            width: "22px",
+            height: "28px",
+            borderRadius: "8px",
+            border: "none",
+            background: "transparent",
+            color: "var(--text-secondary)",
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "flex-end",
+            cursor: "pointer",
+            outline: "none",
+            flexShrink: 0,
+            padding: 0,
+          }}
+        >
+          <span
+            data-refresh-visual
+            style={{
+              width: "18px",
+              height: "28px",
+              borderRadius: "8px",
+              background: treePressed || treeRefreshing ? "rgba(0, 0, 0, 0.06)" : "transparent",
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              width="13"
+              height="13"
+              viewBox="0 0 24 24"
+              aria-hidden="true"
+              style={treeRefreshing ? { animation: "mindfs-update-spin 0.8s linear infinite" } : undefined}
+            >
+              <path
+                fill="currentColor"
+                d="M19.91 15.51h-4.53a1 1 0 0 0 0 2h2.4A8 8 0 0 1 4 12a1 1 0 0 0-2 0a10 10 0 0 0 16.88 7.23V21a1 1 0 0 0 2 0v-4.5a1 1 0 0 0-.97-.99M12 2a10 10 0 0 0-6.88 2.77V3a1 1 0 0 0-2 0v4.5a1 1 0 0 0 1 1h4.5a1 1 0 0 0 0-2h-2.4A8 8 0 0 1 20 12a1 1 0 0 0 2 0A10 10 0 0 0 12 2"
+              />
+            </svg>
+          </span>
+        </button>
         <div ref={menuRef} style={{ position: "relative", flexShrink: 0 }}>
           <button
             type="button"
@@ -3271,6 +3351,22 @@ export function FileTree({
                 );
               }) : null}
               <div style={{ height: "1px", background: "var(--border-color)", margin: "6px 4px" }} />
+              {onStartOnboarding ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onStartOnboarding();
+                    setIsMenuOpen(false);
+                    setIsAppearanceMenuOpen(false);
+                    setIsLocaleMenuOpen(false);
+                    setIsSortMenuOpen(false);
+                  }}
+                  style={fileTreeMenuButtonStyle}
+                >
+                  <OnboardingGuideIcon />
+                  <span>{t("onboarding.menu")}</span>
+                </button>
+              ) : null}
               <button
                 type="button"
                 onClick={() => {

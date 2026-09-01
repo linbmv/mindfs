@@ -126,7 +126,6 @@ func (s *AppContext) GetSessionManager(rootID string) (*session.Manager, error) 
 		return rootCtx.Session, nil
 	}
 	mgr := session.NewManager(rootCtx.Root)
-	mgr.StartIdleLoop(context.Background())
 	rootCtx.Session = mgr
 
 	return mgr, nil
@@ -355,7 +354,7 @@ func (s *AppContext) RunAgentStage(ctx context.Context, exec kanban.AgentStageEx
 		Content:         exec.Prompt,
 		UserTimestamp:   userTimestamp,
 		OnStart: func(start usecase.MessageStart) {
-			s.BroadcastSessionUserMessageAt(exec.RootID, sessionKey, session.TypeChat, sessionName, exec.Stage.Agent, start.Model, start.Mode, start.Effort, start.FastService, planMode, exec.Prompt, userTimestamp)
+			s.BroadcastSessionUserMessageAt(exec.RootID, sessionKey, session.TypeChat, sessionName, exec.Stage.Agent, start.Model, start.Mode, start.Effort, start.FastService, planMode, exec.Prompt, userTimestamp, start.BaseExchangeSeq)
 		},
 		OnUpdate: func(update agenttypes.Event) {
 			updateTracker.Begin()
@@ -592,10 +591,14 @@ func (s *AppContext) GetE2EEManager() *e2ee.Manager {
 }
 
 func (s *AppContext) UpsertRoot(path string) (fs.RootInfo, error) {
+	return s.UpsertRootWithMetaLocation(path, fs.MetaLocationProject)
+}
+
+func (s *AppContext) UpsertRootWithMetaLocation(path, metaLocation string) (fs.RootInfo, error) {
 	if s.Dirs == nil {
 		return fs.RootInfo{}, errors.New("registry not configured")
 	}
-	dir, err := s.Dirs.Upsert(path)
+	dir, err := s.Dirs.UpsertWithMetaLocation(path, metaLocation)
 	if err == nil && s.Scheduled != nil {
 		if reloadErr := s.Scheduled.ReloadRoot(dir.ID); reloadErr != nil {
 			log.Printf("[scheduled-agent] reload.error root=%s err=%v", dir.ID, reloadErr)
@@ -869,9 +872,9 @@ func (s *AppContext) BroadcastSessionUserMessage(rootID, sessionKey, sessionType
 	s.BroadcastSessionUserMessageAt(rootID, sessionKey, sessionType, sessionName, agentName, model, mode, effort, fastService, planMode, content, time.Now().UTC())
 }
 
-func (s *AppContext) BroadcastSessionUserMessageAt(rootID, sessionKey, sessionType, sessionName, agentName, model, mode, effort, fastService string, planMode bool, content string, timestamp time.Time) {
+func (s *AppContext) BroadcastSessionUserMessageAt(rootID, sessionKey, sessionType, sessionName, agentName, model, mode, effort, fastService string, planMode bool, content string, timestamp time.Time, baseExchangeSeq ...int) {
 	s.ClearTaskAuxFlagsForSession(rootID, sessionKey)
-	s.GetSessionStreamHub().BroadcastSessionUserMessageAt(rootID, sessionKey, sessionType, sessionName, agentName, model, mode, effort, fastService, planMode, content, timestamp, "", false)
+	s.GetSessionStreamHub().BroadcastSessionUserMessageAt(rootID, sessionKey, sessionType, sessionName, agentName, model, mode, effort, fastService, planMode, content, timestamp, "", false, baseExchangeSeq...)
 }
 
 func (s *AppContext) BroadcastSessionUpdate(rootID, sessionKey string, update agenttypes.Event) {

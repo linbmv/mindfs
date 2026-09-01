@@ -14,6 +14,9 @@ import (
 
 const preferencesFileName = "preferences.json"
 
+const DefaultIdleSessionResourceReleaseHours = 72
+const MaxIdleSessionResourceReleaseHours = 2_562_047
+
 type Store struct {
 	mu   sync.RWMutex
 	path string
@@ -21,7 +24,73 @@ type Store struct {
 }
 
 type UserPreferences struct {
-	Agents map[string]AgentDefaults `json:"agents,omitempty"`
+	Agents                          map[string]AgentDefaults `json:"agents,omitempty"`
+	SessionNaming                   SessionNamingDefaults    `json:"session_naming,omitempty"`
+	IdleSessionResourceReleaseHours int                      `json:"idle_session_resource_release_hours,omitempty"`
+	NewProjectMetaLocation          string                   `json:"new_project_meta_location,omitempty"`
+}
+
+func (s *Store) NewProjectMetaLocation() string {
+	if s == nil {
+		return "project"
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.data.NewProjectMetaLocation == "home" {
+		return "home"
+	}
+	return "project"
+}
+
+func (s *Store) UpdateNewProjectMetaLocation(location string) error {
+	if s == nil {
+		return nil
+	}
+	location = strings.TrimSpace(location)
+	if location != "project" && location != "home" {
+		return errors.New("invalid new project metadata location")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.data.NewProjectMetaLocation == location {
+		return nil
+	}
+	s.data.NewProjectMetaLocation = location
+	return s.saveLocked()
+}
+
+func (s *Store) IdleSessionResourceReleaseHours() int {
+	if s == nil {
+		return DefaultIdleSessionResourceReleaseHours
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.data.IdleSessionResourceReleaseHours <= 0 {
+		return DefaultIdleSessionResourceReleaseHours
+	}
+	return s.data.IdleSessionResourceReleaseHours
+}
+
+func (s *Store) UpdateIdleSessionResourceReleaseHours(hours int) error {
+	if s == nil {
+		return nil
+	}
+	if hours <= 0 || hours > MaxIdleSessionResourceReleaseHours {
+		return errors.New("idle session resource release hours are out of range")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.data.IdleSessionResourceReleaseHours == hours {
+		return nil
+	}
+	s.data.IdleSessionResourceReleaseHours = hours
+	return s.saveLocked()
+}
+
+type SessionNamingDefaults struct {
+	Agent    string `json:"agent,omitempty"`
+	Model    string `json:"model,omitempty"`
+	Disabled bool   `json:"disabled,omitempty"`
 }
 
 type AgentDefaults struct {
@@ -137,6 +206,36 @@ func (s *Store) UpdateAgentLastConfigSelection(agentName string, selection LastC
 	}
 	next.LastConfigSelection = &selection
 	s.data.Agents[agentName] = next
+	return s.saveLocked()
+}
+
+func (s *Store) SessionNamingDefaults() SessionNamingDefaults {
+	if s == nil {
+		return SessionNamingDefaults{}
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.data.SessionNaming
+}
+
+func (s *Store) UpdateSessionNamingDefaults(agentName, model string, disabled bool) error {
+	if s == nil {
+		return nil
+	}
+	next := SessionNamingDefaults{
+		Agent:    strings.TrimSpace(agentName),
+		Model:    strings.TrimSpace(model),
+		Disabled: disabled,
+	}
+	if next.Agent == "" && !next.Disabled {
+		return errors.New("session naming agent is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.data.SessionNaming == next {
+		return nil
+	}
+	s.data.SessionNaming = next
 	return s.saveLocked()
 }
 

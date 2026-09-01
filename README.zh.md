@@ -1,6 +1,6 @@
 # MindFS
 
-[English](./README.md) | [简体中文](./README.zh.md) | [官网](https://relay.a9gent.com/) | [Discord](https://discord.gg/YPJMqeWSn) | [Twitter](https://x.com/yandc18) | [【微信群】](#微信群)
+[English](./README.md) | [简体中文](./README.zh.md) | [官网](https://relay.a9gent.com/) | [Discord](https://discord.gg/YPJMqeWSn) | [Twitter](https://x.com/yandc18) | [【微信群】](#微信群) | [竞品对比报告](./docs/remote-vibe-project-comparison.md) | [竞品对比ppt](./docs/remote-vibe-project-comparison.pdf)
 
 > **AI Agent 远程访问网关 · 结果可视化**
 
@@ -23,7 +23,7 @@
 
 ### Agent 会话
 
-- **多 Agent 支持**：Claude Code · OpenAI Codex · Gemini CLI · Grok · Cursor · Copilot · Cline · Augment · Kimi · Kiro · Qwen · Qoder · OMP · Pi · Hermes · Reasonix · OpenCode · OpenClaw，自动探测已安装的 Agent。
+- **多 Agent 支持**：Claude Code · OpenAI Codex · Gemini CLI · Grok · Cursor · Copilot · CodeBuddy · Cline · Augment · Kimi · Kiro · Qwen · Qoder · OMP · Pi · Hermes · DeepSeek Harness（DSH）· Reasonix · OpenCode · OpenClaw，自动探测已安装的 Agent。
 - **实时流式输出**：逐 token 推送，工具调用、思考过程、权限请求均以结构化卡片实时渲染，上下文窗口实时余量。
 - **灵活切换**：会话中随时切换 Agent 或模型，多 Agent 共享同一上下文，无需重新描述背景。
 - **会话搜索**：支持按会话标题或对话内容搜索，并可直接跳转到命中的会话和片段。
@@ -48,7 +48,7 @@
 ### 文件访问
 
 - **多 Project**：同时托管多个目录，会话按 Project 独立组织，互不干扰。
-- **数据自托管**：所有对话历史、文件元数据、视图配置均存储在 Project 目录的 `.mindfs/` 子目录下，迁移和备份只需复制目录本身。
+- **数据自托管**：对话历史、文件元数据和视图配置默认存储在项目的 `.mindfs/`；也可在侧边栏菜单中将新项目默认改为 `~/.mindfs/<rootId>/`。已有项目内存在 `.mindfs/` 时始终继续复用。
 - **文件树浏览**：完整的目录树导航，支持文件预览，Markdown、图片、代码均有对应渲染器。支持 git status, git worktree。
 
 ### 交互优化
@@ -107,6 +107,7 @@ MindFS 本身不包含 AI 模型，需要在本机安装至少一个 Agent CLI�
 | **Gemini CLI** | https://geminicli.com/ |
 | **Cursor** | https://cursor.com/cn/cli |
 | **GitHub Copilot** | https://github.com/features/copilot/cli |
+| **CodeBuddy** | https://www.codebuddy.ai/docs/cli/installation（`codebuddy --acp`） |
 | **Cline** | https://cline.bot/kanban |
 | **Augment** | https://www.augmentcode.com/product/CLI |
 | **Kiro** | https://kiro.dev/cli/ |
@@ -118,9 +119,13 @@ MindFS 本身不包含 AI 模型，需要在本机安装至少一个 Agent CLI�
 | **OMP** | https://github.com/can1357/oh-my-pi（`omp acp`） |
 | **Pi** | https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent, and acp adatper: https://github.com/svkozak/pi-acp |
 | **Hermes** | https://hermes-agent.nousresearch.com/docs/user-guide/features/acp |
+| **DeepSeek Harness（DSH）** | https://github.com/deepseek-ai/deepseek-harness，配合 https://github.com/openma-ai/deepseek-harness-acp 适配器 |
 | **Reasonix** | https://github.com/esengine/DeepSeek-Reasonix |
+| **Grok Build** | https://x.ai/cli |
 
 MindFS 已整理常见流行 Agent，在本地 UI 中可以直接安装和更新。打开文件树菜单，选择 **Agent 安装和更新**，即可按当前平台生成安装/更新命令；命令会进入 MindFS 命令执行模式，方便你在当前工作区中确认并运行。
+
+对于 DSH，生成的命令会把 OpenMA ACP 适配器安装到独立的 `mindfs-acp` Profile。Provider、API Key 和默认模型仍在 `dsh web` 中配置；MindFS 与 DSH Web 共用每个用户自己的 `$DSH_HOME/settings.yaml` 和 `$DSH_HOME/.credentials.yaml`。独立 Profile 只隔离 ACP 组合，不会替换或写死用户的 DSH Web 配置。
 
 安装好 Agent 后，即可启动 MindFS 并通过浏览器与之交互。
 
@@ -305,7 +310,9 @@ mindfs [flags] [root]
 
 `root` 是要托管的目录。未指定时，MindFS 只打开服务，不新增托管目录。
 
-默认情况下，`mindfs` 会启动或复用后台服务并自动打开浏览器。传入 `root` 时才会注册目录；如果所选监听地址上已经有 MindFS 服务在运行，命令会复用该服务并新增该目录。
+默认情况下，`mindfs` 会启动或复用后台服务并自动打开浏览器，但不会注册开机自启。执行一次 `mindfs -autostart` 可为当前用户启用；启用后，从终端正常执行 MindFS 会刷新已有启动项和仅当前用户可读的环境变量快照。开机自启时先恢复快照，再加载记录的 shell rc/profile，以 rc 中的最新值为准。使用 `-autostart=false` 可移除启动项和环境快照。
+
+macOS 使用 LaunchAgent，Linux 使用 systemd user service，Windows 使用当前用户启动注册表项。环境快照可能包含 API Key 等凭据，因此保存在平台用户配置目录（`os.UserConfigDir()/mindfs`）中并限制为当前用户访问。
 
 #### 常用命令
 
@@ -330,6 +337,7 @@ mindfs -agent-config /path/to/agents.json
 |------|--------|------|
 | `-addr string` | `127.0.0.1:7331` | 监听地址。使用 `:7331` 或 `0.0.0.0:7331` 可允许局域网访问。 |
 | `-foreground` | `false` | 前台运行服务，不启动后台进程。适合开发、调试或配合进程管理器使用。 |
+| `-autostart` | `false` | 注册或刷新开机自启及环境变量快照；使用 `-autostart=false` 禁用已有启动项。 |
 | `-status` | `false` | 查看后台服务状态、PID、访问地址和日志文件路径。 |
 | `-version` | `false` | 查看当前 MindFS 版本。 |
 | `-update` | `false` | 检查并安装最新 MindFS 版本。更新后需要手动重启 MindFS。 |

@@ -102,19 +102,30 @@ type ContextWindow struct {
 	ModelContextWindow int `json:"modelContextWindow"`
 }
 
+// TokenUsage is the normalized usage for one agent turn. InputTokens is the
+// logical input size before cache discounts. CacheReadTokens is nil when the
+// backend does not report cache telemetry.
+type TokenUsage struct {
+	InputTokens      int  `json:"inputTokens"`
+	OutputTokens     int  `json:"outputTokens"`
+	CacheReadTokens  *int `json:"cacheReadTokens,omitempty"`
+	CacheWriteTokens *int `json:"cacheWriteTokens,omitempty"`
+}
+
 type OpenSessionInput struct {
-	SessionKey     string
-	AgentName      string
-	Model          string
-	Mode           string
-	Effort         string
-	FastService    string
-	PlanMode       bool
-	Probe          bool
-	RootPath       string
-	AgentSessionID string
-	AgentCtxSeq    int
-	ForkPoint      ResolveForkPointOutput
+	SessionKey            string
+	AgentName             string
+	Model                 string
+	Mode                  string
+	Effort                string
+	FastService           string
+	PlanMode              bool
+	Probe                 bool
+	RootPath              string
+	DeveloperInstructions string
+	AgentSessionID        string
+	AgentCtxSeq           int
+	ForkPoint             ResolveForkPointOutput
 }
 
 type RuntimeDefaults struct {
@@ -160,6 +171,13 @@ type ImportExternalSessionInput struct {
 	Agent          string
 	AgentSessionID string
 	AfterTimestamp time.Time
+	Cursor         ExternalSessionCursor
+}
+
+type ExternalSessionCursor struct {
+	SourcePath      string
+	Offset          int64
+	ModTimeUnixNano int64
 }
 
 type ImportedExchange struct {
@@ -186,6 +204,7 @@ type ImportedExternalSession struct {
 	Title          string
 	Exchanges      []ImportedExchange
 	Subagents      []ImportedSubagentSession
+	Cursor         ExternalSessionCursor
 }
 
 // ImportedSubagentSession describes an externally persisted child agent session.
@@ -288,6 +307,7 @@ type ThoughtChunk struct {
 
 type MessageDone struct {
 	ContextWindow   ContextWindow `json:"contextWindow"`
+	TokenUsage      *TokenUsage   `json:"tokenUsage,omitempty"`
 	ParentToolUseID string        `json:"parentToolUseId,omitempty"`
 	TaskID          string        `json:"taskId,omitempty"`
 	SubagentType    string        `json:"subagentType,omitempty"`

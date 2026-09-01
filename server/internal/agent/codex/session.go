@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"mindfs/server/internal/agent/logs"
 	types "mindfs/server/internal/agent/types"
@@ -17,20 +18,21 @@ import (
 )
 
 type OpenOptions struct {
-	AgentName        string
-	SessionKey       string
-	Model            string
-	Effort           string
-	FastService      string
-	PlanMode         bool
-	Probe            bool
-	RootPath         string
-	Command          string
-	Args             []string
-	Env              map[string]string
-	ResumeSessionID  string
-	ForkSessionID    string
-	CodexUserOrdinal *int
+	AgentName             string
+	SessionKey            string
+	Model                 string
+	Effort                string
+	FastService           string
+	PlanMode              bool
+	Probe                 bool
+	RootPath              string
+	Command               string
+	Args                  []string
+	Env                   map[string]string
+	DeveloperInstructions string
+	ResumeSessionID       string
+	ForkSessionID         string
+	CodexUserOrdinal      *int
 }
 
 type Runtime struct {
@@ -49,12 +51,13 @@ func (r *Runtime) OpenSession(_ context.Context, opts OpenOptions) (types.Sessio
 	client := r.getOrCreateClient(opts)
 	var sess *session
 	threadOptions := codexsdk.ThreadOptions{
-		Model:                strings.TrimSpace(opts.Model),
-		ModelReasoningEffort: codexsdk.ModelReasoningEffort(strings.TrimSpace(opts.Effort)),
-		FastService:          strings.TrimSpace(opts.FastService),
-		SandboxMode:          codexsdk.SandboxModeFullAccess,
-		WorkingDirectory:     opts.RootPath,
-		ApprovalPolicy:       codexsdk.ApprovalModeNever,
+		Model:                 strings.TrimSpace(opts.Model),
+		ModelReasoningEffort:  codexsdk.ModelReasoningEffort(strings.TrimSpace(opts.Effort)),
+		FastService:           strings.TrimSpace(opts.FastService),
+		SandboxMode:           codexsdk.SandboxModeFullAccess,
+		WorkingDirectory:      opts.RootPath,
+		DeveloperInstructions: strings.TrimSpace(opts.DeveloperInstructions),
+		ApprovalPolicy:        codexsdk.ApprovalModeNever,
 		ApprovalHandler: func(_ codexsdk.ApprovalRequest) (codexsdk.ApprovalDecision, error) {
 			return codexsdk.ApprovalDecisionApproved, nil
 		},
@@ -168,6 +171,22 @@ func (r *Runtime) getOrCreateClient(opts OpenOptions) *codexsdk.Codex {
 	client := newClient(opts)
 	r.clients[opts.AgentName] = client
 	return client
+}
+
+// ProcessIDs returns the app-server PID keyed by configured agent.
+func (r *Runtime) ProcessIDs() map[string]int {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make(map[string]int, len(r.clients))
+	for agentName, client := range r.clients {
+		if pid := client.ProcessID(); pid > 0 {
+			out[agentName] = pid
+		}
+	}
+	return out
 }
 
 func newClient(opts OpenOptions) *codexsdk.Codex {
@@ -360,10 +379,11 @@ func (s *session) handleStreamedEvents(events <-chan codexsdk.ThreadEvent) error
 			s.updateThreadIDFromThread()
 			log.Printf("[agent/codex] output.done session=%s", s.sessionKey)
 			contextWindow, _ := s.ContextWindow(context.Background())
+			tokenUsage := codexTokenUsage(e.Usage)
 			s.emit(types.Event{
 				Type:      types.EventTypeMessageDone,
 				SessionID: s.SessionID(),
-				Data:      types.MessageDone{ContextWindow: contextWindow},
+				Data:      types.MessageDone{ContextWindow: contextWindow, TokenUsage: tokenUsage},
 			})
 		case *codexsdk.TurnFailedEvent:
 			log.Printf("[agent/codex] send.error session=%s err=%s", s.sessionKey, e.Error.Message)
@@ -868,7 +888,14 @@ func (s *session) ContextWindow(_ context.Context) (types.ContextWindow, error) 
 	return s.contextWindow, nil
 }
 
-func (s *session) Close() error { return nil }
+func (s *session) Close() error {
+	if s == nil || s.thread == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return s.thread.Close(ctx)
+}
 
 func (s *session) updateThreadIDFromThread() {
 	if s == nil || s.thread == nil {
@@ -1053,6 +1080,21 @@ func parseContextWindow(raw json.RawMessage) (types.ContextWindow, bool) {
 	}, true
 }
 
+func codexTokenUsage(usage codexsdk.Usage) *types.TokenUsage {
+	inputTokens := max(0, usage.InputTokens)
+	outputTokens := max(0, usage.OutputTokens)
+	cacheReadTokens := max(0, usage.CachedInputTokens)
+	if inputTokens == 0 && outputTokens == 0 && cacheReadTokens == 0 {
+		return nil
+	}
+	inputTokens = max(inputTokens, cacheReadTokens)
+	return &types.TokenUsage{
+		InputTokens:     inputTokens,
+		OutputTokens:    outputTokens,
+		CacheReadTokens: &cacheReadTokens,
+	}
+}
+
 func messageDelta(prev, next string) string {
 	if next == "" {
 		return ""
@@ -1086,7 +1128,7 @@ func mapToolItem(item codexsdk.ThreadItem, started bool) (types.ToolCall, bool) 
 		}
 		return types.ToolCall{
 			CallID:  v.ID,
-			Title:   firstNonEmpty(v.Command, "command"),
+			Title:   codexCommandTitle(v.CommandActions, v.Command),
 			Status:  status,
 			Kind:    types.ToolKindExecute,
 			Content: content,
@@ -1116,7 +1158,6 @@ func mapToolItem(item codexsdk.ThreadItem, started bool) (types.ToolCall, bool) 
 		}
 		return types.ToolCall{
 			CallID:    v.ID,
-			Title:     "file_change",
 			Status:    status,
 			Kind:      types.ToolKindEdit,
 			Locations: locations,
@@ -1214,6 +1255,57 @@ func mapToolItem(item codexsdk.ThreadItem, started bool) (types.ToolCall, bool) 
 		return mapUnknownToolItem(v, started)
 	default:
 		return types.ToolCall{}, false
+	}
+}
+
+func codexCommandTitle(actions []codexsdk.CommandAction, command string) string {
+	command = firstNonEmpty(strings.TrimSpace(command), "command")
+	if len(actions) != 1 {
+		for _, action := range actions {
+			if action.Type == codexsdk.CommandActionTypeUnknown {
+				return command
+			}
+		}
+		if len(actions) > 1 {
+			return "Explore files · " + command
+		}
+		return command
+	}
+
+	action := actions[0]
+	path := ""
+	if action.Path != nil {
+		path = strings.TrimSpace(*action.Path)
+	}
+	switch action.Type {
+	case codexsdk.CommandActionTypeRead:
+		name := firstNonEmpty(strings.TrimSpace(action.Name), path)
+		if name != "" {
+			return "Read " + name + " · " + command
+		}
+		return "Read file · " + command
+	case codexsdk.CommandActionTypeListFiles:
+		if path != "" {
+			return "List files in " + path + " · " + command
+		}
+		return "List files · " + command
+	case codexsdk.CommandActionTypeSearch:
+		query := ""
+		if action.Query != nil {
+			query = strings.TrimSpace(*action.Query)
+		}
+		switch {
+		case query != "" && path != "":
+			return "Search for " + query + " in " + path + " · " + command
+		case query != "":
+			return "Search for " + query + " · " + command
+		case path != "":
+			return "Search in " + path + " · " + command
+		default:
+			return "Search files · " + command
+		}
+	default:
+		return command
 	}
 }
 

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -36,6 +37,25 @@ func TestPoolGetOrCreateRequiresSessionKey(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "session key required") {
 		t.Fatalf("expected session key required error, got: %v", err)
+	}
+}
+
+func TestPoolSupportsDeveloperInstructionsByConfiguredProtocol(t *testing.T) {
+	pool := NewPool(Config{Agents: []Definition{
+		{Name: "codex-custom", Protocol: ProtocolCodexSDK},
+		{Name: "claude-custom", Protocol: ProtocolClaudeSDK},
+		{Name: "acp-custom", Protocol: ProtocolACP},
+	}})
+	defer pool.CloseAll()
+
+	if !pool.SupportsDeveloperInstructions("codex-custom") {
+		t.Fatal("codex-sdk should support developer instructions")
+	}
+	if !pool.SupportsDeveloperInstructions("claude-custom") {
+		t.Fatal("claude-sdk should support developer instructions")
+	}
+	if pool.SupportsDeveloperInstructions("acp-custom") {
+		t.Fatal("ACP should use the user-message compatibility path")
 	}
 }
 
@@ -94,6 +114,197 @@ func TestPoolCloseAndCloseAll(t *testing.T) {
 	pool.CloseAll()
 	if len(pool.sessions) != 0 {
 		t.Fatalf("expected sessions cleared by CloseAll")
+	}
+}
+
+func TestPoolCloseAllCancelsProcessContextBeforeRuntimeLocks(t *testing.T) {
+	pool := NewPool(loadPoolTestConfig(t))
+	processCtx := pool.processCtx
+	group := runtimeGroup{agentName: "gemini", protocol: ProtocolACP}
+	unlock := pool.lockRuntimeGroups([]runtimeGroup{group})
+	done := make(chan struct{})
+	go func() {
+		pool.CloseAll()
+		close(done)
+	}()
+
+	select {
+	case <-processCtx.Done():
+	case <-time.After(time.Second):
+		unlock()
+		<-done
+		t.Fatal("process context was not canceled before waiting for runtime lock")
+	}
+	unlock()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("CloseAll did not finish after runtime lock was released")
+	}
+}
+
+func TestPoolCloseAllClosesClaudeSessionProcesses(t *testing.T) {
+	pool := NewPool(loadPoolTestConfig(t))
+	sess := &idleReleaseTestSession{}
+	pool.sessions["claude-session"] = &sessionEntry{
+		agentName:  "claude",
+		sessionKey: "claude-session",
+		protocol:   ProtocolClaudeSDK,
+		session:    sess,
+	}
+
+	pool.CloseAll()
+	if sess.closeCount != 1 {
+		t.Fatalf("Claude session Close calls = %d, want 1", sess.closeCount)
+	}
+}
+
+type idleReleaseTestSession struct {
+	agenttypes.Session
+	closeCount int
+	closeErr   error
+}
+
+func (s *idleReleaseTestSession) Close() error {
+	s.closeCount++
+	return s.closeErr
+}
+
+func TestPoolReleaseIdleSessionsSkipsActiveUse(t *testing.T) {
+	pool := NewPool(loadPoolTestConfig(t))
+	defer pool.CloseAll()
+	now := time.Now()
+	sess := &idleReleaseTestSession{}
+	pool.sessions["idle"] = &sessionEntry{
+		agentName:  "test-agent",
+		sessionKey: "idle",
+		protocol:   ProtocolClaudeSDK,
+		session:    sess,
+		lastUsedAt: now.Add(-3 * time.Hour),
+	}
+	finishUse := pool.BeginSessionUse("idle")
+	if got := pool.ReleaseIdleSessions(time.Hour, now); got != 0 {
+		t.Fatalf("released active sessions = %d, want 0", got)
+	}
+	finishUse()
+	if got := pool.ReleaseIdleSessions(time.Hour, now.Add(2*time.Hour)); got != 1 {
+		t.Fatalf("released idle sessions = %d, want 1", got)
+	}
+	if sess.closeCount != 1 {
+		t.Fatalf("Close calls = %d, want 1", sess.closeCount)
+	}
+	if _, ok := pool.sessions["idle"]; ok {
+		t.Fatal("released session remains in pool")
+	}
+}
+
+func TestPoolReleaseIdleSessionsKeepsEntryWhenCloseFails(t *testing.T) {
+	pool := NewPool(loadPoolTestConfig(t))
+	defer pool.CloseAll()
+	now := time.Now()
+	sess := &idleReleaseTestSession{closeErr: errors.New("close failed")}
+	pool.sessions["idle"] = &sessionEntry{
+		agentName:  "test-agent",
+		sessionKey: "idle",
+		protocol:   ProtocolClaudeSDK,
+		session:    sess,
+		lastUsedAt: now.Add(-3 * time.Hour),
+	}
+	if got := pool.ReleaseIdleSessions(time.Hour, now); got != 0 {
+		t.Fatalf("released failed sessions = %d, want 0", got)
+	}
+	entry := pool.sessions["idle"]
+	if entry == nil || entry.closing {
+		t.Fatalf("failed session entry not restored: %#v", entry)
+	}
+}
+
+func TestPoolReleaseInactiveSessionsImmediatelySkipsActiveUse(t *testing.T) {
+	pool := NewPool(loadPoolTestConfig(t))
+	defer pool.CloseAll()
+	now := time.Now()
+	inactive := &idleReleaseTestSession{}
+	active := &idleReleaseTestSession{}
+	pool.sessions["inactive"] = &sessionEntry{
+		agentName:  "test-agent",
+		sessionKey: "inactive",
+		protocol:   ProtocolClaudeSDK,
+		session:    inactive,
+		lastUsedAt: now,
+	}
+	pool.sessions["active"] = &sessionEntry{
+		agentName:  "test-agent",
+		sessionKey: "active",
+		protocol:   ProtocolClaudeSDK,
+		session:    active,
+		lastUsedAt: now.Add(-24 * time.Hour),
+		activeUses: 1,
+	}
+
+	result := pool.ReleaseInactiveSessionsDetailed(now)
+	if result.ReleasedSessions != 1 || inactive.closeCount != 1 || active.closeCount != 0 {
+		t.Fatalf("release = %#v, inactive closes=%d active closes=%d", result, inactive.closeCount, active.closeCount)
+	}
+	if pool.sessions["inactive"] != nil || pool.sessions["active"] == nil {
+		t.Fatalf("unexpected remaining sessions: %#v", pool.sessions)
+	}
+}
+
+func TestPoolReleaseIdleSessionsReleasesLastSharedRuntimeSession(t *testing.T) {
+	pool := NewPool(loadPoolTestConfig(t))
+	defer pool.CloseAll()
+	now := time.Now()
+	idleSession := &idleReleaseTestSession{}
+	activeSession := &idleReleaseTestSession{}
+	pool.sessions["idle-1"] = &sessionEntry{
+		agentName:  "codex",
+		sessionKey: "idle-1",
+		protocol:   ProtocolCodexSDK,
+		session:    idleSession,
+		lastUsedAt: now.Add(-3 * time.Hour),
+	}
+	pool.sessions["active"] = &sessionEntry{
+		agentName:  "codex",
+		sessionKey: "active",
+		protocol:   ProtocolCodexSDK,
+		session:    activeSession,
+		lastUsedAt: now,
+	}
+
+	result := pool.ReleaseIdleSessionsDetailed(time.Hour, now)
+	if result.ReleasedSessions != 1 || idleSession.closeCount != 1 || activeSession.closeCount != 0 {
+		t.Fatalf("first release = %#v, idle closes=%d active closes=%d", result, idleSession.closeCount, activeSession.closeCount)
+	}
+	result = pool.ReleaseIdleSessionsDetailed(time.Hour, now.Add(2*time.Hour))
+	if result.ReleasedSessions != 1 || activeSession.closeCount != 1 {
+		t.Fatalf("second release = %#v, active closes=%d", result, activeSession.closeCount)
+	}
+}
+
+func TestPoolMemorySnapshotAddsSessionCounts(t *testing.T) {
+	pool := NewPool(loadPoolTestConfig(t))
+	defer pool.CloseAll()
+	now := time.Now()
+	pool.memorySnapshot = MemorySnapshot{MeasuredAt: now}
+	pool.sessions["idle"] = &sessionEntry{
+		agentName:  "claude",
+		sessionKey: "idle",
+		protocol:   ProtocolClaudeSDK,
+		session:    &idleReleaseTestSession{},
+		lastUsedAt: now.Add(-2 * time.Hour),
+	}
+	pool.sessions["active"] = &sessionEntry{
+		agentName:  "claude",
+		sessionKey: "active",
+		protocol:   ProtocolClaudeSDK,
+		session:    &idleReleaseTestSession{},
+		lastUsedAt: now,
+		activeUses: 1,
+	}
+
+	snapshot := pool.MemorySnapshot(false)
+	if len(snapshot.Agents) != 1 || snapshot.Agents[0].Name != "claude" || snapshot.Agents[0].SessionCount != 2 {
+		t.Fatalf("memory snapshot agents = %#v", snapshot.Agents)
 	}
 }
 
@@ -250,6 +461,20 @@ func TestLoadConfigReadsOMPAgent(t *testing.T) {
 	}
 	if len(def.Args) != 1 || def.Args[0] != "acp" {
 		t.Fatalf("omp args = %#v", def.Args)
+	}
+}
+
+func TestLoadConfigReadsCodeBuddyAgent(t *testing.T) {
+	cfg := loadPoolTestConfig(t)
+	def, ok := cfg.GetAgent("CodeBuddy")
+	if !ok {
+		t.Fatalf("expected CodeBuddy in test agents.json")
+	}
+	if def.Command != "codebuddy" || def.Protocol != ProtocolACP {
+		t.Fatalf("CodeBuddy definition = command %q protocol %q", def.Command, def.Protocol)
+	}
+	if len(def.Args) != 1 || def.Args[0] != "--acp" {
+		t.Fatalf("CodeBuddy args = %#v", def.Args)
 	}
 }
 

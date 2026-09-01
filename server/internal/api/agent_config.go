@@ -666,20 +666,24 @@ func resolveAgentConfigSwitchSources(entry agentConfigManifestEntry, def agent.D
 // each agent runtime actually loads. Older custom definitions often recorded
 // alternate filenames (config_octopus.toml, config.json) that made a switch
 // appear successful while leaving the live configuration unchanged.
+// Normalization only applies to files recorded inside the agent's own config
+// directory; unrelated config.toml files elsewhere (project-local ones, for
+// example) are left untouched so a switch cannot rewrite them.
 func normalizeAgentConfigSwitchPath(agentName, rawPath string) string {
 	agentName = strings.ToLower(strings.TrimSpace(agentName))
 	rawPath = strings.TrimSpace(rawPath)
 	base := strings.ToLower(filepath.Base(rawPath))
+	parent := strings.ToLower(filepath.Base(filepath.Dir(rawPath)))
 	switch agentName {
 	case "codex":
 		// Codex always reads its user configuration from config.toml.
-		if strings.HasSuffix(base, ".toml") {
+		if parent == ".codex" && strings.HasSuffix(base, ".toml") {
 			return "~/.codex/config.toml"
 		}
 	case "grok":
 		// Grok CLI reads ~/.grok/config.toml. Older MindFS definitions used
 		// config.json, so switching only touched a file the CLI never loads.
-		if base == "config.json" || base == "config.toml" || strings.HasSuffix(base, ".toml") {
+		if parent == ".grok" && (base == "config.json" || strings.HasSuffix(base, ".toml")) {
 			return "~/.grok/config.toml"
 		}
 	}
@@ -941,13 +945,43 @@ func switchAgentConfig(req agentConfigSwitchRequest, app *AppContext) (agentConf
 	if err != nil {
 		return agentConfigManifestEntry{}, false, err
 	}
+	// Preserve the selected Codex provider key while restoring config.toml.
+	var codexStableProvider string
+	var codexConfigPath string
+	isCodex := def.Protocol == agent.ProtocolCodexSDK
+	if isCodex {
+		if home, homeErr := os.UserHomeDir(); homeErr == nil {
+			codexConfigPath = filepath.Clean(filepath.Join(home, ".codex", "config.toml"))
+		}
+		for _, source := range switchSources {
+			sourcePath, pathErr := expandUserPath(source.SourcePath)
+			if pathErr != nil || codexConfigPath == "" || filepath.Clean(sourcePath) != codexConfigPath {
+				continue
+			}
+			if payload, readErr := os.ReadFile(sourcePath); readErr == nil {
+				codexStableProvider = codexModelProviderFromConfig(string(payload))
+			}
+			break
+		}
+	}
 	for _, source := range switchSources {
 		sourcePath, err := expandUserPath(source.SourcePath)
 		if err != nil {
 			return agentConfigManifestEntry{}, false, err
 		}
-		if err := copyFile(filepath.Join(configRoot, filepath.FromSlash(source.BackupPath)), sourcePath); err != nil {
+		backupPath := filepath.Join(configRoot, filepath.FromSlash(source.BackupPath))
+		if err := copyFile(backupPath, sourcePath); err != nil {
 			return agentConfigManifestEntry{}, false, err
+		}
+		if codexStableProvider != "" && isCodex && codexConfigPath != "" && filepath.Clean(sourcePath) == codexConfigPath {
+			payload, readErr := os.ReadFile(sourcePath)
+			if readErr != nil {
+				return agentConfigManifestEntry{}, false, apperr.Wrap("read", sourcePath, readErr)
+			}
+			normalized := preserveCodexModelProviderKey(string(payload), codexStableProvider)
+			if err := os.WriteFile(sourcePath, []byte(normalized), 0o600); err != nil {
+				return agentConfigManifestEntry{}, false, apperr.Wrap("write", sourcePath, err)
+			}
 		}
 	}
 	var env map[string]string

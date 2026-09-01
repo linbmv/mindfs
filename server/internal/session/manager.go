@@ -94,6 +94,9 @@ CREATE TABLE IF NOT EXISTS session_agent_bindings (
 	agent TEXT NOT NULL,
 	agent_session_id TEXT NOT NULL,
 	agent_ctx_seq INTEGER NOT NULL DEFAULT 0,
+	external_source_path TEXT NOT NULL DEFAULT '',
+	external_source_offset INTEGER NOT NULL DEFAULT 0,
+	external_source_mtime_ns INTEGER NOT NULL DEFAULT 0,
 	PRIMARY KEY (session_key, agent)
 );`
 	upsertAgentBindingSQL = `
@@ -104,15 +107,15 @@ ON CONFLICT(session_key, agent) DO UPDATE SET
 	agent_session_id = excluded.agent_session_id,
 	agent_ctx_seq = excluded.agent_ctx_seq`
 	selectAgentBindingSQL = `
-SELECT session_key, agent, agent_session_id, agent_ctx_seq
+SELECT session_key, agent, agent_session_id, agent_ctx_seq, external_source_path, external_source_offset, external_source_mtime_ns
 FROM session_agent_bindings
 WHERE session_key = ? AND agent = ?`
 	selectAgentBindingsBySessionSQL = `
-SELECT session_key, agent, agent_session_id, agent_ctx_seq
+SELECT session_key, agent, agent_session_id, agent_ctx_seq, external_source_path, external_source_offset, external_source_mtime_ns
 FROM session_agent_bindings
 WHERE session_key = ?`
 	selectBindingByAgentSessionSQL = `
-SELECT session_key, agent, agent_session_id, agent_ctx_seq
+SELECT session_key, agent, agent_session_id, agent_ctx_seq, external_source_path, external_source_offset, external_source_mtime_ns
 FROM session_agent_bindings
 WHERE agent = ? AND agent_session_id = ?
 LIMIT 1`
@@ -127,15 +130,10 @@ var mindFSConfigDir = configpkg.MindFSConfigDir
 type Manager struct {
 	root             fs.RootInfo
 	mu               sync.Mutex
-	loopOnce         sync.Once
 	db               *sql.DB
 	sessions         map[string]*Session
 	pendingToolCalls map[string]map[string]agenttypes.ToolCall
 	now              func() time.Time
-	idleInterval     time.Duration
-	idleFor          time.Duration
-	closeFor         time.Duration
-	maxIdleSessions  int
 }
 
 type CreateInput struct {
@@ -154,10 +152,17 @@ type CreateInput struct {
 }
 
 type AgentBinding struct {
-	SessionKey     string `json:"session_key"`
-	Agent          string `json:"agent"`
-	AgentSessionID string `json:"agent_session_id"`
-	AgentCtxSeq    int    `json:"agent_ctx_seq"`
+	SessionKey            string `json:"session_key"`
+	Agent                 string `json:"agent"`
+	AgentSessionID        string `json:"agent_session_id"`
+	AgentCtxSeq           int    `json:"agent_ctx_seq"`
+	ExternalSourcePath    string `json:"external_source_path,omitempty"`
+	ExternalSourceOffset  int64  `json:"external_source_offset,omitempty"`
+	ExternalSourceMtimeNS int64  `json:"external_source_mtime_ns,omitempty"`
+}
+
+func (b AgentBinding) ExternalCursor() agenttypes.ExternalSessionCursor {
+	return agenttypes.ExternalSessionCursor{SourcePath: b.ExternalSourcePath, Offset: b.ExternalSourceOffset, ModTimeUnixNano: b.ExternalSourceMtimeNS}
 }
 
 type ListOptions struct {
@@ -174,10 +179,6 @@ func NewManager(root fs.RootInfo, opts ...Option) *Manager {
 		sessions:         make(map[string]*Session),
 		pendingToolCalls: make(map[string]map[string]agenttypes.ToolCall),
 		now:              time.Now,
-		idleInterval:     1 * time.Minute,
-		idleFor:          10 * time.Minute,
-		closeFor:         7 * 24 * time.Hour,
-		maxIdleSessions:  3,
 	}
 	for _, opt := range opts {
 		opt(m)
@@ -190,23 +191,6 @@ type Option func(*Manager)
 func WithClock(now func() time.Time) Option {
 	return func(m *Manager) {
 		m.now = now
-	}
-}
-
-func WithIdlePolicy(interval, idleFor, closeFor time.Duration, maxIdleSessions int) Option {
-	return func(m *Manager) {
-		if interval > 0 {
-			m.idleInterval = interval
-		}
-		if idleFor > 0 {
-			m.idleFor = idleFor
-		}
-		if closeFor > 0 {
-			m.closeFor = closeFor
-		}
-		if maxIdleSessions > 0 {
-			m.maxIdleSessions = maxIdleSessions
-		}
 	}
 }
 
@@ -473,6 +457,7 @@ func (m *Manager) Search(_ context.Context, opts SearchOptions) ([]SearchHit, er
 }
 
 type exchangeModelDisplayNameContextKey struct{}
+type exchangeTokenUsageContextKey struct{}
 
 func WithExchangeModelDisplayName(ctx context.Context, displayName string) context.Context {
 	displayName = strings.TrimSpace(displayName)
@@ -490,15 +475,35 @@ func exchangeModelDisplayNameFromContext(ctx context.Context) string {
 	return strings.TrimSpace(value)
 }
 
+func WithExchangeTokenUsage(ctx context.Context, usage *agenttypes.TokenUsage) context.Context {
+	if ctx == nil || usage == nil {
+		return ctx
+	}
+	copy := *usage
+	return context.WithValue(ctx, exchangeTokenUsageContextKey{}, &copy)
+}
+
+func exchangeTokenUsageFromContext(ctx context.Context) *agenttypes.TokenUsage {
+	if ctx == nil {
+		return nil
+	}
+	usage, _ := ctx.Value(exchangeTokenUsageContextKey{}).(*agenttypes.TokenUsage)
+	if usage == nil {
+		return nil
+	}
+	copy := *usage
+	return &copy
+}
+
 func (m *Manager) AddExchangeForAgent(ctx context.Context, session *Session, role, content, agent, mode, effort, fastService string) error {
-	return m.addExchangeForAgentAt(session, role, content, agent, exchangeModelDisplayNameFromContext(ctx), mode, effort, fastService, time.Time{})
+	return m.addExchangeForAgentAt(session, role, content, agent, exchangeModelDisplayNameFromContext(ctx), exchangeTokenUsageFromContext(ctx), mode, effort, fastService, time.Time{})
 }
 
 func (m *Manager) AddExchangeForAgentAt(ctx context.Context, session *Session, role, content, agent, mode, effort, fastService string, timestamp time.Time) error {
-	return m.addExchangeForAgentAt(session, role, content, agent, exchangeModelDisplayNameFromContext(ctx), mode, effort, fastService, timestamp)
+	return m.addExchangeForAgentAt(session, role, content, agent, exchangeModelDisplayNameFromContext(ctx), exchangeTokenUsageFromContext(ctx), mode, effort, fastService, timestamp)
 }
 
-func (m *Manager) addExchangeForAgentAt(session *Session, role, content, agent, modelDisplayName, mode, effort, fastService string, timestamp time.Time) error {
+func (m *Manager) addExchangeForAgentAt(session *Session, role, content, agent, modelDisplayName string, tokenUsage *agenttypes.TokenUsage, mode, effort, fastService string, timestamp time.Time) error {
 	if session == nil || strings.TrimSpace(session.Key) == "" {
 		return errors.New("session required")
 	}
@@ -532,6 +537,7 @@ func (m *Manager) addExchangeForAgentAt(session *Session, role, content, agent, 
 		Effort:           strings.TrimSpace(effort),
 		FastService:      fastService,
 		Content:          content,
+		TokenUsage:       tokenUsage,
 		Timestamp:        ts,
 	}
 	if err := m.appendExchange(session.Key, record); err != nil {
@@ -779,6 +785,18 @@ func (m *Manager) UpsertAgentBinding(_ context.Context, binding AgentBinding) er
 	return m.upsertAgentBindingUnsafe(binding)
 }
 
+func (m *Manager) UpdateExternalSessionCursor(_ context.Context, sessionKey, agent string, cursor agenttypes.ExternalSessionCursor) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	db, err := m.ensureSessionMetaDBUnsafe()
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(`UPDATE session_agent_bindings SET external_source_path = ?, external_source_offset = ?, external_source_mtime_ns = ? WHERE session_key = ? AND agent = ?`,
+		strings.TrimSpace(cursor.SourcePath), cursor.Offset, cursor.ModTimeUnixNano, strings.TrimSpace(sessionKey), strings.TrimSpace(agent))
+	return err
+}
+
 func (m *Manager) GetAgentBinding(_ context.Context, sessionKey, agent string) (*AgentBinding, error) {
 	if strings.TrimSpace(sessionKey) == "" {
 		return nil, errors.New("session key required")
@@ -794,7 +812,7 @@ func (m *Manager) GetAgentBinding(_ context.Context, sessionKey, agent string) (
 	}
 	row := db.QueryRow(selectAgentBindingSQL, strings.TrimSpace(sessionKey), strings.TrimSpace(agent))
 	var binding AgentBinding
-	if err := row.Scan(&binding.SessionKey, &binding.Agent, &binding.AgentSessionID, &binding.AgentCtxSeq); err != nil {
+	if err := scanAgentBinding(row, &binding); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, errSessionNotFound
 		}
@@ -825,11 +843,12 @@ func (m *Manager) FindAgentBindingByAgentSession(_ context.Context, agent, agent
 		return nil, err
 	}
 	var binding AgentBinding
-	err = db.QueryRow(
+	row := db.QueryRow(
 		selectBindingByAgentSessionSQL,
 		strings.TrimSpace(agent),
 		strings.TrimSpace(agentSessionID),
-	).Scan(&binding.SessionKey, &binding.Agent, &binding.AgentSessionID, &binding.AgentCtxSeq)
+	)
+	err = scanAgentBinding(row, &binding)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -886,7 +905,7 @@ func (m *Manager) listAgentBindingsUnsafe(sessionKey string) ([]AgentBinding, er
 	bindings := make([]AgentBinding, 0)
 	for rows.Next() {
 		var binding AgentBinding
-		if err := rows.Scan(&binding.SessionKey, &binding.Agent, &binding.AgentSessionID, &binding.AgentCtxSeq); err != nil {
+		if err := scanAgentBinding(rows, &binding); err != nil {
 			return nil, err
 		}
 		bindings = append(bindings, binding)
@@ -895,6 +914,10 @@ func (m *Manager) listAgentBindingsUnsafe(sessionKey string) ([]AgentBinding, er
 		return nil, err
 	}
 	return bindings, nil
+}
+
+func scanAgentBinding(scanner rowScanner, binding *AgentBinding) error {
+	return scanner.Scan(&binding.SessionKey, &binding.Agent, &binding.AgentSessionID, &binding.AgentCtxSeq, &binding.ExternalSourcePath, &binding.ExternalSourceOffset, &binding.ExternalSourceMtimeNS)
 }
 
 func (m *Manager) upsertAgentBindingUnsafe(binding AgentBinding) error {
@@ -1118,52 +1141,6 @@ func (m *Manager) deleteSessionUnsafe(key string) error {
 	return nil
 }
 
-func (m *Manager) CheckIdle(ctx context.Context, idleAfter, closeAfter time.Duration) ([]*Session, []*Session, error) {
-	if idleAfter <= 0 || closeAfter <= 0 {
-		return nil, nil, errors.New("idle and close thresholds required")
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	sessions, err := m.listSessionsUnsafe(ListOptions{})
-	if err != nil {
-		return nil, nil, err
-	}
-	now := m.now().UTC()
-	closed := []*Session{}
-	for _, s := range sessions {
-		if s.ClosedAt != nil {
-			continue
-		}
-		if now.Sub(s.UpdatedAt) >= closeAfter {
-			updated, err := m.closeSessionUnsafe(s.Key)
-			if err == nil {
-				closed = append(closed, updated)
-			}
-		}
-	}
-	return []*Session{}, closed, nil
-}
-
-func (m *Manager) StartIdleLoop(ctx context.Context) {
-	if ctx == nil {
-		return
-	}
-	m.loopOnce.Do(func() {
-		ticker := time.NewTicker(m.idleInterval)
-		go func() {
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ticker.C:
-					m.CheckIdle(ctx, m.idleFor, m.closeFor)
-				case <-ctx.Done():
-					return
-				}
-			}
-		}()
-	})
-}
-
 func (m *Manager) Shutdown() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1189,6 +1166,14 @@ func (m *Manager) ExchangeLogPath(key string) string {
 		return ""
 	}
 	return filepath.ToSlash(filepath.Join(".mindfs", path))
+}
+
+func (m *Manager) ExchangeLogAbsolutePath(key string) string {
+	path, err := m.exchangePath(key)
+	if err != nil { return "" }
+	metaDir := m.root.MetaDir()
+	if metaDir == "" { return "" }
+	return filepath.Join(metaDir, filepath.FromSlash(path))
 }
 
 func (m *Manager) createSessionUnsafe(session *Session) error {
@@ -1794,6 +1779,9 @@ func openSessionMetaDB(dbFile string) (db *sql.DB, err error) {
 		`ALTER TABLE sessions ADD COLUMN last_context_window_total_tokens INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE sessions ADD COLUMN last_context_window_model_context_window INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE sessions ADD COLUMN pinned_at TEXT`,
+		`ALTER TABLE session_agent_bindings ADD COLUMN external_source_path TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE session_agent_bindings ADD COLUMN external_source_offset INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE session_agent_bindings ADD COLUMN external_source_mtime_ns INTEGER NOT NULL DEFAULT 0`,
 	} {
 		if _, err := db.Exec(stmt); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
 			db.Close()

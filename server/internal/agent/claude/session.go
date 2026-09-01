@@ -42,18 +42,19 @@ type claudeTaskInfo struct {
 }
 
 type OpenOptions struct {
-	AgentName       string
-	SessionKey      string
-	Model           string
-	Effort          string
-	PlanMode        bool
-	RootPath        string
-	Command         string
-	Args            []string
-	Env             map[string]string
-	ResumeSessionID string
-	ForkSessionID   string
-	ResumeMessageID string
+	AgentName             string
+	SessionKey            string
+	Model                 string
+	Effort                string
+	PlanMode              bool
+	RootPath              string
+	Command               string
+	Args                  []string
+	Env                   map[string]string
+	DeveloperInstructions string
+	ResumeSessionID       string
+	ForkSessionID         string
+	ResumeMessageID       string
 }
 
 type Runtime struct{}
@@ -84,6 +85,7 @@ func (r *Runtime) OpenSession(ctx context.Context, opts OpenOptions) (types.Sess
 		claudeagent.WithForwardSubagentText(true),
 		claudeagent.WithCanUseTool(s.handleCanUseTool),
 	}
+	optionList = appendClaudeDeveloperInstructions(optionList, opts.DeveloperInstructions)
 	if strings.TrimSpace(opts.Command) != "" {
 		optionList = append(optionList, claudeagent.WithCLIPath(opts.Command))
 	}
@@ -160,6 +162,15 @@ func (r *Runtime) OpenSession(ctx context.Context, opts OpenOptions) (types.Sess
 	return s, nil
 }
 
+func appendClaudeDeveloperInstructions(options []claudeagent.Option, developerInstructions string) []claudeagent.Option {
+	if instructions := strings.TrimSpace(developerInstructions); instructions != "" {
+		return append(options, claudeagent.WithExtraArgs(map[string]*string{
+			"append-system-prompt": &instructions,
+		}))
+	}
+	return options
+}
+
 func (r *Runtime) CloseAll() {}
 
 func claudeFirstAvailableModel(client *claudeagent.Client) (string, bool) {
@@ -209,6 +220,13 @@ type session struct {
 
 	questionMu    sync.Mutex
 	questionWaits map[string]chan askUserAnswerResult
+}
+
+func (s *session) ProcessID() int {
+	if s == nil || s.client == nil {
+		return 0
+	}
+	return s.client.ProcessID()
 }
 
 type askUserAnswerResult struct {
@@ -403,17 +421,8 @@ func (s *session) ListModels(ctx context.Context) (types.ModelList, error) {
 	}
 	supported := s.client.SupportedModelsFromInit()
 	models := make([]types.ModelInfo, 0, len(supported))
-	for index, model := range supported {
-		name := strings.TrimSpace(model.DisplayName)
-		if name == "" {
-			name = strings.TrimSpace(model.Value)
-		}
-		models = append(models, types.ModelInfo{
-			ID:            model.Value,
-			Name:          name,
-			Description:   model.Description,
-			SupportEffort: claudeModelSupportsEffortAt(supported, index),
-		})
+	for _, model := range supported {
+		models = append(models, claudeModelInfo(model))
 	}
 	log.Printf("[agent/claude] models.cached session=%s count=%d", s.sessionKey, len(models))
 	currentModelID := ""
@@ -431,29 +440,22 @@ func (s *session) ListModels(ctx context.Context) (types.ModelList, error) {
 	}, nil
 }
 
-func claudeModelSupportsEffortAt(models []claudeagent.ModelInfo, index int) bool {
-	if index < 0 || index >= len(models) {
-		return false
+func claudeModelInfo(model claudeagent.ModelInfo) types.ModelInfo {
+	name := strings.TrimSpace(model.DisplayName)
+	if name == "" {
+		name = strings.TrimSpace(model.Value)
 	}
-	model := models[index]
-	if claudeModelSupportsEffort(model.Value, model.DisplayName, model.Description) {
-		return true
+	return types.ModelInfo{
+		ID:            model.Value,
+		Name:          name,
+		Description:   model.Description,
+		SupportEffort: true,
+		Efforts:       claudeEffortLevels(),
 	}
-	if !strings.EqualFold(strings.TrimSpace(model.Value), "default") {
-		return false
-	}
-	for _, candidate := range models {
-		if strings.EqualFold(strings.TrimSpace(candidate.Value), "default") {
-			continue
-		}
-		return claudeModelSupportsEffort(candidate.Value, candidate.DisplayName, candidate.Description)
-	}
-	return false
 }
 
-func claudeModelSupportsEffort(id, name, description string) bool {
-	joined := strings.ToLower(strings.TrimSpace(id) + " " + strings.TrimSpace(name) + " " + strings.TrimSpace(description))
-	return strings.Contains(joined, "sonnet") || strings.Contains(joined, "opus")
+func claudeEffortLevels() []string {
+	return []string{"low", "medium", "high", "xhigh", "max"}
 }
 
 func (s *session) SetMode(_ context.Context, _ string) error {
@@ -646,10 +648,11 @@ func (s *session) consumeMessages() {
 			s.updateContextWindow(m)
 			s.logRawMessage(raw)
 			contextWindow, _ := s.ContextWindow(context.Background())
+			tokenUsage := claudeTokenUsage(m)
 			s.emit(types.Event{
 				Type:      types.EventTypeMessageDone,
 				SessionID: s.SessionID(),
-				Data:      types.MessageDone{ContextWindow: contextWindow},
+				Data:      types.MessageDone{ContextWindow: contextWindow, TokenUsage: tokenUsage},
 			})
 			s.completeTurn(resultErr(m))
 			s.sawDelta = false
@@ -1225,8 +1228,9 @@ func summarizeExecuteToolCall(name string, input json.RawMessage, fallbackMeta m
 	meta := map[string]any{"command": command}
 	if desc := strings.TrimSpace(payload.Description); desc != "" {
 		meta["description"] = desc
+		return desc, meta
 	}
-	return command, meta
+	return "Run command", meta
 }
 
 func summarizeSearchToolCall(name string, input json.RawMessage, fallbackMeta map[string]any) (string, map[string]any) {
@@ -2374,6 +2378,36 @@ func (s *session) updateContextWindow(msg claudeagent.ResultMessage) {
 	s.mu.Lock()
 	s.context.ModelContextWindow = modelContextWindow
 	s.mu.Unlock()
+}
+
+func claudeTokenUsage(msg claudeagent.ResultMessage) *types.TokenUsage {
+	inputTokens := 0
+	outputTokens := 0
+	cacheReadTokens := 0
+	cacheWriteTokens := 0
+	if msg.Usage != nil {
+		inputTokens = max(0, msg.Usage.InputTokens)
+		outputTokens = max(0, msg.Usage.OutputTokens)
+		cacheReadTokens = max(0, msg.Usage.CacheReadInputTokens)
+		cacheWriteTokens = max(0, msg.Usage.CacheCreationInputTokens)
+	} else {
+		for _, usage := range msg.ModelUsage {
+			inputTokens += max(0, usage.InputTokens)
+			outputTokens += max(0, usage.OutputTokens)
+			cacheReadTokens += max(0, usage.CacheReadInputTokens)
+			cacheWriteTokens += max(0, usage.CacheCreationInputTokens)
+		}
+	}
+	if inputTokens == 0 && outputTokens == 0 && cacheReadTokens == 0 && cacheWriteTokens == 0 {
+		return nil
+	}
+	logicalInputTokens := inputTokens + cacheReadTokens + cacheWriteTokens
+	return &types.TokenUsage{
+		InputTokens:      logicalInputTokens,
+		OutputTokens:     outputTokens,
+		CacheReadTokens:  &cacheReadTokens,
+		CacheWriteTokens: &cacheWriteTokens,
+	}
 }
 
 func (s *session) enqueueTurn(waiter chan error) {

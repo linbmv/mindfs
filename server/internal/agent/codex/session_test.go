@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
@@ -10,6 +11,37 @@ import (
 	codextypes "github.com/fanwenlin/codex-go-sdk/types"
 )
 
+type closeSessionRPCExec struct {
+	method string
+	params map[string]any
+}
+
+func (e *closeSessionRPCExec) Run(codexsdk.CodexExecArgs) <-chan codexsdk.ExecResult {
+	return make(chan codexsdk.ExecResult)
+}
+
+func (e *closeSessionRPCExec) RPCCall(_ context.Context, method string, params interface{}) (json.RawMessage, error) {
+	e.method = method
+	e.params, _ = params.(map[string]any)
+	return json.RawMessage(`{}`), nil
+}
+
+func TestSessionCloseUnsubscribesCodexThread(t *testing.T) {
+	exec := &closeSessionRPCExec{}
+	client := codexsdk.NewCodexWithExec(exec, codexsdk.CodexOptions{})
+	s := &session{
+		client:   client,
+		thread:   client.ResumeThread("thread-1", codexsdk.ThreadOptions{}),
+		threadID: "thread-1",
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if exec.method != "thread/unsubscribe" || exec.params["threadId"] != "thread-1" {
+		t.Fatalf("RPC = %q %#v", exec.method, exec.params)
+	}
+}
+
 func TestCodexListModelsParamsIncludesHiddenModels(t *testing.T) {
 	params := codexListModelsParams()
 	if params.IncludeHidden == nil {
@@ -17,6 +49,75 @@ func TestCodexListModelsParamsIncludesHiddenModels(t *testing.T) {
 	}
 	if !*params.IncludeHidden {
 		t.Fatal("IncludeHidden = false, want true")
+	}
+}
+
+func TestCodexTokenUsageNormalizesTurnUsage(t *testing.T) {
+	got := codexTokenUsage(codexsdk.Usage{
+		InputTokens:       12_400,
+		CachedInputTokens: 10_168,
+		OutputTokens:      1_100,
+	})
+	if got == nil || got.InputTokens != 12_400 || got.OutputTokens != 1_100 {
+		t.Fatalf("usage = %#v", got)
+	}
+	if got.CacheReadTokens == nil || *got.CacheReadTokens != 10_168 {
+		t.Fatalf("cache read = %#v", got.CacheReadTokens)
+	}
+}
+
+func TestMapCommandExecutionUsesNaturalLanguageTitle(t *testing.T) {
+	path := "server"
+	query := "TODO"
+	output := "ok\n"
+	toolCall, ok := mapToolItem(&codexsdk.CommandExecutionItem{
+		ID:      "command-1",
+		Type:    "commandExecution",
+		Command: "go test ./...",
+		CommandActions: []codexsdk.CommandAction{{
+			Type:  codexsdk.CommandActionTypeSearch,
+			Query: &query,
+			Path:  &path,
+		}},
+		AggregatedOutput: &output,
+		Status:           codexsdk.CommandExecutionStatusCompleted,
+	}, false)
+	if !ok {
+		t.Fatal("mapToolItem returned false")
+	}
+	if toolCall.Title != "Search for TODO in server · go test ./..." {
+		t.Fatalf("title = %q, want natural-language title", toolCall.Title)
+	}
+	if toolCall.Meta["command"] != "go test ./..." {
+		t.Fatalf("meta = %#v, want original command in details", toolCall.Meta)
+	}
+}
+
+func TestCodexCommandTitle(t *testing.T) {
+	path := "server"
+	tests := []struct {
+		name    string
+		actions []codexsdk.CommandAction
+		want    string
+	}{
+		{name: "no parsed action", want: "go test ./..."},
+		{name: "read", actions: []codexsdk.CommandAction{{Type: codexsdk.CommandActionTypeRead, Name: "README.md"}}, want: "Read README.md · go test ./..."},
+		{name: "list", actions: []codexsdk.CommandAction{{Type: codexsdk.CommandActionTypeListFiles, Path: &path}}, want: "List files in server · go test ./..."},
+		{name: "multiple structured actions", actions: []codexsdk.CommandAction{
+			{Type: codexsdk.CommandActionTypeRead, Name: "go.mod"},
+			{Type: codexsdk.CommandActionTypeSearch, Path: &path},
+		}, want: "Explore files · go test ./..."},
+		{name: "multiple including unknown", actions: []codexsdk.CommandAction{
+			{Type: codexsdk.CommandActionTypeRead, Name: "go.mod"},
+			{Type: codexsdk.CommandActionTypeUnknown},
+		}, want: "go test ./..."},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := codexCommandTitle(tc.actions, "go test ./..."); got != tc.want {
+				t.Fatalf("codexCommandTitle() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

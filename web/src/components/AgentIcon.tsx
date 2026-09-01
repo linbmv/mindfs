@@ -11,8 +11,10 @@ const ICON_URLS: Record<string, { src: string; alt: string }> = {
   codex: { src: appPath('/assets/agents/codex.svg'), alt: 'Codex' },
   claude: { src: appPath('/assets/agents/claude.svg'), alt: 'Claude' },
   cline: { src: appPath('/assets/agents/cline.svg'), alt: 'Cline' },
+  codebuddy: { src: appPath('/assets/agents/codebuddy.svg'), alt: 'CodeBuddy' },
   copilot: { src: appPath('/assets/agents/copilot.svg'), alt: 'Copilot' },
   cursor: { src: appPath('/assets/agents/cursor.svg'), alt: 'Cursor' },
+  dsh: { src: appPath('/assets/agents/dsh.svg'), alt: 'DeepSeek Harness' },
   gemini: { src: appPath('/assets/agents/gemini.svg'), alt: 'Gemini' },
   grok: { src: appPath('/assets/agents/grok.svg'), alt: 'Grok' },
   hermes: { src: appPath('/assets/agents/hermes.webp'), alt: 'Hermes' },
@@ -135,12 +137,16 @@ export function AgentIcon({ agentName, ...props }: AgentIconProps) {
     icon = ICON_URLS.qwen;
   } else if (lowerAgentName.includes('reasonix')) {
     icon = ICON_URLS.reasonix;
+  } else if (agentTokens.includes('dsh')) {
+    icon = ICON_URLS.dsh;
   } else if (lowerAgentName.includes('kiro')) {
     icon = ICON_URLS.kiro;
   } else if (lowerAgentName.includes('kimi')) {
     icon = ICON_URLS.kimi;
   } else if (lowerAgentName.includes('cline')) {
     icon = ICON_URLS.cline;
+  } else if (lowerAgentName.includes('codebuddy')) {
+    icon = ICON_URLS.codebuddy;
   } else if (lowerAgentName.includes('codex')) {
     icon = ICON_URLS.codex;
   } else if (lowerAgentName.includes('claude')) {

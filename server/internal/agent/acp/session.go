@@ -65,19 +65,19 @@ func (r *Runtime) OpenSession(ctx context.Context, opts OpenOptions) (types.Sess
 	}
 	if strings.TrimSpace(opts.Model) != "" {
 		if err := proc.SetModel(ctx, opts.SessionKey, opts.Model); err != nil {
-			proc.CloseSession(opts.SessionKey)
+			proc.ForgetSession(opts.SessionKey)
 			return nil, err
 		}
 	}
 	if strings.TrimSpace(opts.Mode) != "" {
 		if err := proc.SetMode(ctx, opts.SessionKey, opts.Mode); err != nil {
-			proc.CloseSession(opts.SessionKey)
+			proc.ForgetSession(opts.SessionKey)
 			return nil, err
 		}
 	}
 	if strings.TrimSpace(opts.Effort) != "" {
 		if err := proc.SetThoughtLevel(ctx, opts.SessionKey, opts.Effort); err != nil {
-			proc.CloseSession(opts.SessionKey)
+			proc.ForgetSession(opts.SessionKey)
 			return nil, err
 		}
 	}
@@ -149,13 +149,15 @@ func mapModeState(state *acpsdk.SessionModeState) types.ModeList {
 
 func (r *Runtime) CloseSession(sessionKey string) {
 	for _, proc := range r.listProcesses() {
-		proc.CloseSession(sessionKey)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = proc.CloseSession(ctx, sessionKey)
+		cancel()
 	}
 }
 
-func (r *Runtime) Close(agentName string) {
+func (r *Runtime) Close(agentName string) error {
 	if strings.TrimSpace(agentName) == "" {
-		return
+		return nil
 	}
 	r.mu.Lock()
 	proc := r.processes[agentName]
@@ -163,13 +165,15 @@ func (r *Runtime) Close(agentName string) {
 	delete(r.closeHints, agentName)
 	r.mu.Unlock()
 	if proc != nil {
-		_ = proc.Close()
+		closeErr := proc.Close()
 		if hint, ok := waitForRecentStderrHint(proc, 750*time.Millisecond); ok {
 			r.mu.Lock()
 			r.closeHints[agentName] = hint
 			r.mu.Unlock()
 		}
+		return closeErr
 	}
+	return nil
 }
 
 func (r *Runtime) RecentCloseHint(agentName string) (string, bool) {
@@ -203,10 +207,24 @@ func waitForRecentStderrHint(proc *Process, wait time.Duration) (string, bool) {
 }
 
 func (r *Runtime) CloseAll() {
-	procs := r.listProcessesAndReset()
+	closeProcessesConcurrently(r.listProcessesAndReset(), (*Process).Close)
+}
+
+func closeProcessesConcurrently(procs []*Process, closeProcess func(*Process) error) {
+	var closeWG sync.WaitGroup
 	for _, proc := range procs {
-		proc.Close()
+		if proc == nil {
+			continue
+		}
+		closeWG.Add(1)
+		go func(proc *Process) {
+			defer closeWG.Done()
+			if err := closeProcess(proc); err != nil {
+				log.Printf("[agent/acp] process.close_all.error agent=%s err=%v", proc.agentLabel(), err)
+			}
+		}(proc)
 	}
+	closeWG.Wait()
 }
 
 func (r *Runtime) listProcesses() []*Process {
@@ -217,6 +235,22 @@ func (r *Runtime) listProcesses() []*Process {
 		procs = append(procs, proc)
 	}
 	return procs
+}
+
+// ProcessIDs returns the live shared process PID keyed by configured agent.
+func (r *Runtime) ProcessIDs() map[string]int {
+	if r == nil {
+		return nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make(map[string]int, len(r.processes))
+	for agentName, proc := range r.processes {
+		if pid := proc.ProcessID(); pid > 0 {
+			out[agentName] = pid
+		}
+	}
+	return out
 }
 
 func (r *Runtime) listProcessesAndReset() []*Process {
@@ -354,7 +388,7 @@ func (s *session) OnUpdate(onUpdate func(types.Event)) {
 				onUpdate(types.Event{
 					Type:      types.EventTypeMessageDone,
 					SessionID: update.SessionID,
-					Data:      types.MessageDone{ContextWindow: contextWindow},
+					Data:      types.MessageDone{ContextWindow: contextWindow, TokenUsage: update.TokenUsage},
 				})
 				return
 			}
@@ -394,8 +428,9 @@ func (s *session) RuntimeDefaults(context.Context) (types.RuntimeDefaults, error
 }
 
 func (s *session) Close() error {
-	s.proc.CloseSession(s.sessionKey)
-	return nil
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return s.proc.CloseSession(ctx, s.sessionKey)
 }
 
 func (s *session) logRawToolUpdate(update SessionUpdate) {

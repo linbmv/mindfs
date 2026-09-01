@@ -74,6 +74,32 @@ func TestManagerResetAgentBindingsKeepsOtherAgents(t *testing.T) {
 	}
 }
 
+func TestManagerExternalCursorSurvivesAgentStateUpdate(t *testing.T) {
+	root := rootfs.NewRootInfo("mindfs", "mindfs", t.TempDir())
+	manager := NewManager(root)
+	created, err := manager.Create(context.Background(), CreateInput{Type: TypeChat, Agent: "codex", Name: "Cursor"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.UpsertAgentBinding(context.Background(), AgentBinding{SessionKey: created.Key, Agent: "codex", AgentSessionID: "external-1"}); err != nil {
+		t.Fatal(err)
+	}
+	cursor := agenttypes.ExternalSessionCursor{SourcePath: "/tmp/session.jsonl", Offset: 1234, ModTimeUnixNano: 5678}
+	if err := manager.UpdateExternalSessionCursor(context.Background(), created.Key, "codex", cursor); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.UpdateAgentState(context.Background(), created, "codex", 3, "external-1"); err != nil {
+		t.Fatal(err)
+	}
+	binding, err := manager.GetAgentBinding(context.Background(), created.Key, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if binding.ExternalCursor() != cursor {
+		t.Fatalf("cursor = %#v, want %#v", binding.ExternalCursor(), cursor)
+	}
+}
+
 func TestManagerRecordRelatedWorktreeDoesNotOverwriteExisting(t *testing.T) {
 	rootDir := t.TempDir()
 	root := rootfs.NewRootInfo("mindfs", "mindfs", rootDir)
@@ -369,6 +395,37 @@ func TestManagerPersistsExchangeModelDisplayName(t *testing.T) {
 	}
 	if got := loaded.Exchanges[0].ModelDisplayName; got != "glm-4.7" {
 		t.Fatalf("exchange model display name = %q, want snapshot", got)
+	}
+}
+
+func TestManagerPersistsExchangeTokenUsage(t *testing.T) {
+	root := rootfs.NewRootInfo("mindfs", "mindfs", t.TempDir())
+	manager := NewManager(root)
+	created, err := manager.Create(context.Background(), CreateInput{
+		Type: TypeChat, Agent: "codex", Model: "gpt-test", Name: "Chat",
+	})
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	cacheRead := 8_000
+	usage := &agenttypes.TokenUsage{
+		InputTokens: 10_000, OutputTokens: 1_200, CacheReadTokens: &cacheRead,
+	}
+	ctx := WithExchangeTokenUsage(context.Background(), usage)
+	if err := manager.AddExchangeForAgent(ctx, created, "agent", "reply", "codex", "", "", ""); err != nil {
+		t.Fatalf("add exchange: %v", err)
+	}
+
+	loaded, err := manager.Get(context.Background(), created.Key, 0)
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	got := loaded.Exchanges[0].TokenUsage
+	if got == nil || got.InputTokens != 10_000 || got.OutputTokens != 1_200 {
+		t.Fatalf("token usage = %#v", got)
+	}
+	if got.CacheReadTokens == nil || *got.CacheReadTokens != 8_000 {
+		t.Fatalf("cache read = %#v", got.CacheReadTokens)
 	}
 }
 
