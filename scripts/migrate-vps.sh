@@ -20,6 +20,10 @@ fi
 REPO="${MINDFS_REPO:-a9gent/mindfs}"
 PREFIX="${MINDFS_PREFIX:-/opt/mindfs}"
 DATA_DIR="${MINDFS_DATA_DIR:-/var/lib/mindfs}"
+HOME_DIR="${MINDFS_HOME_DIR:-}"
+CONFIG_DIR="${MINDFS_CONFIG_DIR:-}"
+SERVICE_SCRIPT="${MINDFS_SERVICE_SCRIPT:-}"
+SERVICE_UNIT="${MINDFS_SERVICE_UNIT:-}"
 PROJECT_DIR="${MINDFS_PROJECT_DIR:-}"
 PROJECTS_DIR="${MINDFS_PROJECTS_DIR:-}"
 SERVICE_NAME="${MINDFS_SERVICE_NAME:-mindfs}"
@@ -33,6 +37,8 @@ PORT="${MINDFS_PORT:-}"
 ENABLE_TLS="${MINDFS_ENABLE_TLS:-}"
 ENABLE_E2EE="${MINDFS_ENABLE_E2EE:-}"
 NO_RELAYER="${MINDFS_NO_RELAYER:-}"
+METADATA_ONLY="${MINDFS_METADATA_ONLY:-0}"
+INCLUDE_AGENT_DATA="${MINDFS_INCLUDE_AGENT_DATA:-0}"
 DEPLOY_BRANCH="${MINDFS_DEPLOY_BRANCH:-custom/mindfs-local}"
 DEPLOY_SCRIPT_URL="${MINDFS_DEPLOY_SCRIPT_URL:-}"
 DRY_RUN=0
@@ -40,6 +46,9 @@ YES=0
 ENCRYPT=0
 
 PREFIX_SET=0
+DATA_DIR_SET=0
+HOME_DIR_SET=0
+CONFIG_DIR_SET=0
 PROJECT_DIR_SET=0
 SERVICE_NAME_SET=0
 SERVICE_USER_SET=0
@@ -49,8 +58,12 @@ PORT_SET=0
 ENABLE_TLS_SET=0
 ENABLE_E2EE_SET=0
 NO_RELAYER_SET=0
+SERVICE_SCRIPT_SET=0
 
 [[ -n "${MINDFS_PREFIX:-}" ]] && PREFIX_SET=1
+[[ -n "${MINDFS_DATA_DIR:-}" ]] && DATA_DIR_SET=1
+[[ -n "${MINDFS_HOME_DIR:-}" ]] && HOME_DIR_SET=1
+[[ -n "${MINDFS_CONFIG_DIR:-}" ]] && CONFIG_DIR_SET=1
 [[ -n "${MINDFS_PROJECT_DIR:-}" ]] && PROJECT_DIR_SET=1
 [[ -n "${MINDFS_SERVICE_NAME:-}" ]] && SERVICE_NAME_SET=1
 [[ -n "${MINDFS_SERVICE_USER:-}" ]] && SERVICE_USER_SET=1
@@ -60,14 +73,29 @@ NO_RELAYER_SET=0
 [[ -n "${MINDFS_ENABLE_TLS:-}" ]] && ENABLE_TLS_SET=1
 [[ -n "${MINDFS_ENABLE_E2EE:-}" ]] && ENABLE_E2EE_SET=1
 [[ -n "${MINDFS_NO_RELAYER:-}" ]] && NO_RELAYER_SET=1
+[[ -n "${MINDFS_SERVICE_SCRIPT:-}" ]] && SERVICE_SCRIPT_SET=1
 
-CONFIG_HOME=""
 START_SCRIPT=""
 CONTROL_SCRIPT=""
 SERVICE_MODE=""
 SERVICE_WAS_ACTIVE=0
 SERVICE_WAS_MODE=""
 SERVICE_GROUP=""
+RUNTIME_PID=""
+RUNTIME_EXE=""
+RUNTIME_CWD=""
+RUNTIME_SERVICE_SCRIPT=""
+RUNTIME_PID_FILE=""
+RUNTIME_UNIT=""
+RUNTIME_SOURCE=""
+RUNTIME_USER=""
+RUNTIME_XDG_CONFIG_HOME=""
+RUNTIME_XDG_DATA_HOME=""
+RUNTIME_AGENT_CONFIG=""
+RUNTIME_CMD=()
+RUNTIME_ENV_HOME=""
+RUNTIME_DISCOVERED=0
+AGENT_CONFIG_PATH=""
 STAGE_DIR=""
 TEMP_ARCHIVE=""
 DEPLOY_TEMP=""
@@ -108,6 +136,10 @@ Backup options:
   --output PATH                 Archive path
   --backup-dir PATH             Default output directory (/root/mindfs-backups)
   --encrypt                     Encrypt archive with GnuPG AES-256
+  --metadata-only               Include config and metadata, not project source
+  --include-agent-data          Include Codex/Claude config and conversation files
+  --exclude-agent-data          Exclude Codex/Claude data (default)
+  --full-data                   Include project source and DATA_DIR contents
 
 Restore options:
   --archive PATH                Backup archive (required)
@@ -120,7 +152,11 @@ Common options:
   --version VERSION             Release to install on the new VPS
   --prefix PATH                 Binary prefix (default: /opt/mindfs)
   --data-dir PATH               Persistent data (default: /var/lib/mindfs)
+  --home-dir PATH               Service/user HOME (default: DATA_DIR)
+  --config-dir PATH             MindFS config directory (default: DATA_DIR/config/mindfs)
   --project-dir PATH            Backup source or restore startup project
+  --service-script PATH         Existing service controller for backup
+  --service-unit NAME           Existing systemd unit for backup
   --service-name NAME           Service name (default: mindfs)
   --service-user NAME           Service user (default: mindfs)
   --init MODE                   auto, systemd, or background
@@ -183,6 +219,30 @@ parse_args() {
       --data-dir)
         need_value "$@"
         DATA_DIR="$2"
+        DATA_DIR_SET=1
+        shift 2
+        ;;
+      --home-dir)
+        need_value "$@"
+        HOME_DIR="$2"
+        HOME_DIR_SET=1
+        shift 2
+        ;;
+      --config-dir)
+        need_value "$@"
+        CONFIG_DIR="$2"
+        CONFIG_DIR_SET=1
+        shift 2
+        ;;
+      --service-script)
+        need_value "$@"
+        SERVICE_SCRIPT="$2"
+        SERVICE_SCRIPT_SET=1
+        shift 2
+        ;;
+      --service-unit)
+        need_value "$@"
+        SERVICE_UNIT="$2"
         shift 2
         ;;
       --project-dir)
@@ -265,6 +325,22 @@ parse_args() {
         ENCRYPT=1
         shift
         ;;
+      --metadata-only)
+        METADATA_ONLY=1
+        shift
+        ;;
+      --include-agent-data)
+        INCLUDE_AGENT_DATA=1
+        shift
+        ;;
+      --exclude-agent-data)
+        INCLUDE_AGENT_DATA=0
+        shift
+        ;;
+      --full-data)
+        METADATA_ONLY=0
+        shift
+        ;;
       --yes)
         YES=1
         shift
@@ -298,12 +374,23 @@ validate_common() {
   }
   require_absolute_path PREFIX "$PREFIX"
   require_absolute_path DATA_DIR "$DATA_DIR"
+  if [[ "$MODE" == "backup" ]]; then
+    # These are only fallback values. discover_runtime() replaces them with
+    # the values used by the running instance before any files are copied.
+    [[ -n "$HOME_DIR" ]] || HOME_DIR="$DATA_DIR"
+    [[ -n "$CONFIG_DIR" ]] || CONFIG_DIR="${HOME_DIR}/.config/mindfs"
+    [[ -n "$SERVICE_SCRIPT" ]] || SERVICE_SCRIPT="${PREFIX}/bin/mindfs-service"
+  else
+    [[ -n "$HOME_DIR" ]] || HOME_DIR="$DATA_DIR"
+    [[ -n "$CONFIG_DIR" ]] || CONFIG_DIR="${DATA_DIR}/config/mindfs"
+  fi
+  require_absolute_path HOME_DIR "$HOME_DIR"
+  require_absolute_path CONFIG_DIR "$CONFIG_DIR"
   [[ "$REPO" =~ ^[^/[:space:]]+/[^/[:space:]]+$ ]] || die "invalid repository: $REPO"
   [[ "$SERVICE_NAME" =~ ^[A-Za-z0-9_.@-]+$ ]] || die "invalid service name: $SERVICE_NAME"
   [[ "$SERVICE_USER" =~ ^[A-Za-z_][A-Za-z0-9_-]*$ ]] || die "invalid service user: $SERVICE_USER"
   [[ "$INIT_MODE" == "auto" || "$INIT_MODE" == "systemd" || "$INIT_MODE" == "background" ]] || die "invalid init mode: $INIT_MODE"
 
-  CONFIG_HOME="${DATA_DIR}/config/mindfs"
   START_SCRIPT="${PREFIX}/bin/mindfs-vps-start"
   CONTROL_SCRIPT="${PREFIX}/bin/mindfs-service"
 
@@ -314,6 +401,11 @@ validate_common() {
     [[ -n "$ARCHIVE_PATH" ]] || ARCHIVE_PATH="${BACKUP_DIR}/mindfs-migration-$(date -u +%Y%m%dT%H%M%SZ).tar.gz"
     require_absolute_path ARCHIVE_PATH "$ARCHIVE_PATH"
     [[ "$ENCRYPT" == 1 || "$ARCHIVE_PATH" != *.gpg ]] || die "a .gpg archive requires --encrypt"
+    [[ "$METADATA_ONLY" == 0 || "$METADATA_ONLY" == 1 ]] || die "--metadata-only must be 0 or 1"
+    [[ "$INCLUDE_AGENT_DATA" == 0 || "$INCLUDE_AGENT_DATA" == 1 ]] || die "--include-agent-data must be 0 or 1"
+    if [[ "$SERVICE_SCRIPT_SET" == 1 ]]; then
+      [[ -x "$SERVICE_SCRIPT" ]] || die "service script is not executable: $SERVICE_SCRIPT"
+    fi
   else
     [[ -n "$ARCHIVE_PATH" ]] || die "restore requires --archive PATH"
     require_absolute_path ARCHIVE_PATH "$ARCHIVE_PATH"
@@ -322,6 +414,291 @@ validate_common() {
     require_absolute_path PROJECTS_DIR "$PROJECTS_DIR"
     [[ -n "$DEPLOY_SCRIPT_URL" ]] || DEPLOY_SCRIPT_URL="https://raw.githubusercontent.com/linbmv/mindfs/${DEPLOY_BRANCH}/scripts/deploy-vps.sh"
   fi
+}
+
+is_absolute_path() {
+  [[ "${1:-}" == /* && "${1:-}" != "/" && "${1:-}" != *$'\n'* && "${1:-}" != *$'\r'* && "${1:-}" != *$'\t'* ]]
+}
+
+canonical_path() {
+  local value="$1"
+  if [[ -e "$value" || -L "$value" ]]; then
+    readlink -f -- "$value" 2>/dev/null || printf '%s\n' "$value"
+  else
+    printf '%s\n' "${value%/}"
+  fi
+}
+
+proc_value() {
+  local pid="$1" name="$2"
+  [[ -r "/proc/$pid/$name" ]] || return 1
+  if [[ "$name" == "cmdline" || "$name" == "environ" ]]; then
+    tr '\0' '\n' <"/proc/$pid/$name"
+  else
+    cat "/proc/$pid/$name"
+  fi
+}
+
+pid_is_mindfs() {
+  local pid="$1" line exe
+  [[ "$pid" =~ ^[0-9]+$ && -r "/proc/$pid/cmdline" ]] || return 1
+  exe="$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)"
+  [[ "$(basename -- "$exe")" == "mindfs" ]] && return 0
+  while IFS= read -r line; do
+    [[ "$line" == *"mindfs"* ]] && return 0
+  done < <(proc_value "$pid" cmdline 2>/dev/null || true)
+  return 1
+}
+
+read_pid_file() {
+  local path="$1" pid
+  [[ -f "$path" ]] || return 1
+  pid="$(tr -d '[:space:]' <"$path" 2>/dev/null || true)"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  pid_is_mindfs "$pid" || return 1
+  printf '%s\n' "$pid"
+}
+
+split_listen_address() {
+  local address="$1"
+  if [[ "$address" == \[*\]:* ]]; then
+    BIND_ADDR="${address#\[}"
+    BIND_ADDR="${BIND_ADDR%%\]:*}"
+    PORT="${address##*]:}"
+  elif [[ "$address" == *:* ]]; then
+    BIND_ADDR="${address%:*}"
+    PORT="${address##*:}"
+  else
+    BIND_ADDR="$address"
+  fi
+}
+
+parse_runtime_cmdline() {
+  local arg next
+  RUNTIME_CMD=()
+  while IFS= read -r -d '' arg; do
+    RUNTIME_CMD+=("$arg")
+  done <"/proc/$RUNTIME_PID/cmdline"
+  for ((i=0; i<${#RUNTIME_CMD[@]}; i++)); do
+    arg="${RUNTIME_CMD[$i]}"
+    next="${RUNTIME_CMD[$((i + 1))]:-}"
+    case "$arg" in
+      -addr|--addr)
+        [[ -n "$next" ]] && split_listen_address "$next"
+        ;;
+      -addr=*|--addr=*)
+        split_listen_address "${arg#*=}"
+        ;;
+      -e2ee|--e2ee) ENABLE_E2EE=1 ;;
+      -no-e2ee|--no-e2ee) ENABLE_E2EE=0 ;;
+      -tls|--tls) ENABLE_TLS=1 ;;
+      -no-tls|--no-tls) ENABLE_TLS=0 ;;
+      -no-relayer|--no-relayer) NO_RELAYER=1 ;;
+      -agent-config|--agent-config)
+        [[ -n "$next" ]] && RUNTIME_AGENT_CONFIG="$next"
+        ;;
+      -agent-config=*|--agent-config=*) RUNTIME_AGENT_CONFIG="${arg#*=}" ;;
+    esac
+  done
+}
+
+discover_from_process() {
+  local pid="$1" env_line candidate
+  [[ -r "/proc/$pid/cmdline" ]] || return 1
+  RUNTIME_PID="$pid"
+  RUNTIME_EXE="$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)"
+  RUNTIME_CWD="$(readlink -f "/proc/$pid/cwd" 2>/dev/null || true)"
+  RUNTIME_USER="$(stat -c '%U' "/proc/$pid" 2>/dev/null || true)"
+  RUNTIME_ENV_HOME=""
+  RUNTIME_XDG_CONFIG_HOME=""
+  RUNTIME_XDG_DATA_HOME=""
+  while IFS= read -r env_line; do
+    case "$env_line" in
+      HOME=*) RUNTIME_ENV_HOME="${env_line#HOME=}" ;;
+      XDG_CONFIG_HOME=*) RUNTIME_XDG_CONFIG_HOME="${env_line#XDG_CONFIG_HOME=}" ;;
+      XDG_DATA_HOME=*) RUNTIME_XDG_DATA_HOME="${env_line#XDG_DATA_HOME=}" ;;
+    esac
+  done < <(proc_value "$pid" environ 2>/dev/null || true)
+  parse_runtime_cmdline
+  [[ -n "$RUNTIME_ENV_HOME" ]] || RUNTIME_ENV_HOME="$(getent passwd "$RUNTIME_USER" 2>/dev/null | cut -d: -f6 || true)"
+  [[ -n "$RUNTIME_ENV_HOME" ]] || RUNTIME_ENV_HOME="${HOME_DIR:-$DATA_DIR}"
+  [[ -n "$RUNTIME_XDG_CONFIG_HOME" ]] || RUNTIME_XDG_CONFIG_HOME="$RUNTIME_ENV_HOME/.config"
+  [[ -n "$RUNTIME_XDG_DATA_HOME" ]] || RUNTIME_XDG_DATA_HOME="$RUNTIME_ENV_HOME/.local/share"
+
+  [[ "$HOME_DIR_SET" == 1 ]] || HOME_DIR="$RUNTIME_ENV_HOME"
+  [[ "$CONFIG_DIR_SET" == 1 ]] || CONFIG_DIR="${RUNTIME_XDG_CONFIG_HOME%/}/mindfs"
+  [[ "$PROJECT_DIR_SET" == 1 ]] || PROJECT_DIR="$RUNTIME_CWD"
+  [[ "$PREFIX_SET" == 1 ]] || {
+    if [[ "$RUNTIME_EXE" == */bin/mindfs ]]; then
+      PREFIX="${RUNTIME_EXE%/bin/mindfs}"
+    fi
+  }
+  [[ "$DATA_DIR_SET" == 1 ]] || {
+    # MindFS has no single data directory in local mode. Use the runtime cwd
+    # for registry discovery, while retaining DATA_DIR only for deployed mode.
+    DATA_DIR="$RUNTIME_CWD"
+  }
+  if [[ -n "$RUNTIME_AGENT_CONFIG" && "$RUNTIME_AGENT_CONFIG" == /* ]]; then
+    AGENT_CONFIG_PATH="$RUNTIME_AGENT_CONFIG"
+  fi
+  if [[ "$PROJECT_DIR_SET" != 1 ]]; then
+    for candidate in \
+      "$RUNTIME_CWD/mindfs-service.sh" \
+      "$RUNTIME_CWD/mindfs-service" \
+      "$RUNTIME_ENV_HOME/mindfs/mindfs-service.sh" \
+      "$RUNTIME_ENV_HOME/mindfs/mindfs-service"; do
+      if [[ -f "$candidate" ]]; then
+        RUNTIME_SERVICE_SCRIPT="$candidate"
+        SERVICE_SCRIPT="$candidate"
+        break
+      fi
+    done
+  fi
+  RUNTIME_SOURCE="running PID $pid (/proc)"
+  RUNTIME_DISCOVERED=1
+  return 0
+}
+
+discover_from_running_process() {
+  local proc pid exe
+  local -a pids=()
+  for proc in /proc/[0-9]*; do
+    [[ -r "$proc/exe" ]] || continue
+    pid="${proc##*/}"
+    exe="$(readlink -f "$proc/exe" 2>/dev/null || true)"
+    [[ "$(basename -- "$exe")" == "mindfs" ]] || continue
+    pids+=("$pid")
+  done
+  if ((${#pids[@]} == 1)); then
+    discover_from_process "${pids[0]}"
+    return 0
+  fi
+  if ((${#pids[@]} > 1)); then
+    warn "发现多个运行中的 MindFS 进程 (${pids[*]})；请使用 --service-unit、--service-script 或 --port 指定目标"
+  fi
+  return 1
+}
+
+discover_from_pid_files() {
+  local candidate pid
+  local -a candidates=()
+  [[ -n "$SERVICE_SCRIPT" ]] && candidates+=("$(dirname -- "$SERVICE_SCRIPT")/.mindfs-service/mindfs.pid")
+  [[ -n "$SERVICE_SCRIPT" ]] && candidates+=("$(dirname -- "$SERVICE_SCRIPT")/mindfs.pid")
+  [[ -n "$DATA_DIR" ]] && candidates+=("$DATA_DIR/mindfs.pid" "$DATA_DIR/.mindfs-service/mindfs.pid")
+  [[ -n "$HOME_DIR" ]] && candidates+=("$HOME_DIR/mindfs/mindfs.pid" "$HOME_DIR/mindfs/.mindfs-service/mindfs.pid")
+  for candidate in "${candidates[@]}"; do
+    pid="$(read_pid_file "$candidate" 2>/dev/null || true)"
+    [[ -n "$pid" ]] || continue
+    discover_from_process "$pid"
+    RUNTIME_PID_FILE="$candidate"
+    return 0
+  done
+  return 1
+}
+
+discover_from_systemd() {
+  local unit unit_path value
+  local -a units=()
+  if [[ -n "$SERVICE_UNIT" ]]; then
+    units+=("$SERVICE_UNIT")
+  elif command -v systemctl >/dev/null 2>&1; then
+    while IFS= read -r unit; do
+      [[ "$unit" == *.service ]] && units+=("${unit%.service}")
+    done < <(systemctl list-unit-files 'mindfs*.service' --no-legend --no-pager 2>/dev/null | awk '{print $1}')
+    [[ ${#units[@]} -gt 0 ]] || units+=("$SERVICE_NAME")
+  fi
+  for unit in "${units[@]}"; do
+    unit_path="$(systemctl show -p FragmentPath --value "$unit.service" 2>/dev/null || true)"
+    [[ -n "$unit_path" && -f "$unit_path" ]] || continue
+    SERVICE_UNIT="${unit%.service}.service"
+    SERVICE_NAME="${unit%.service}"
+    value="$(systemctl show -p MainPID --value "$SERVICE_UNIT" 2>/dev/null || true)"
+    if [[ "$value" =~ ^[0-9]+$ ]] && pid_is_mindfs "$value"; then
+      discover_from_process "$value"
+      RUNTIME_UNIT="$SERVICE_UNIT"
+      RUNTIME_SOURCE="systemd unit $SERVICE_UNIT + PID $value"
+      return 0
+    fi
+    # Inactive units still provide authoritative paths and arguments for a
+    # future restore, but must not be stopped as if they were active.
+    value="$(systemctl show -p WorkingDirectory --value "$SERVICE_UNIT" 2>/dev/null || true)"
+    [[ "$value" == /* ]] && { [[ "$PROJECT_DIR_SET" == 1 ]] || PROJECT_DIR="$value"; }
+    value="$(systemctl show -p User --value "$SERVICE_UNIT" 2>/dev/null || true)"
+    [[ -n "$value" && "$value" != "root" ]] && { SERVICE_USER="$value"; SERVICE_USER_SET=1; }
+    value="$(systemctl show -p Environment --value "$SERVICE_UNIT" 2>/dev/null || true)"
+    for env_line in $value; do
+      case "$env_line" in
+        HOME=*) [[ "$HOME_DIR_SET" == 1 ]] || HOME_DIR="${env_line#HOME=}" ;;
+        XDG_CONFIG_HOME=*) [[ "$CONFIG_DIR_SET" == 1 ]] || CONFIG_DIR="${env_line#XDG_CONFIG_HOME=}/mindfs" ;;
+      esac
+    done
+    RUNTIME_UNIT="$SERVICE_UNIT"
+    RUNTIME_SOURCE="systemd unit $SERVICE_UNIT"
+    RUNTIME_DISCOVERED=1
+    return 0
+  done
+  return 1
+}
+
+discover_from_service_script() {
+  local candidate dir line value
+  local -a candidates=()
+  [[ -n "$SERVICE_SCRIPT" ]] && candidates+=("$SERVICE_SCRIPT")
+  [[ -n "$HOME_DIR" ]] && candidates+=("$HOME_DIR/mindfs/mindfs-service.sh" "$HOME_DIR/mindfs/mindfs-service")
+  [[ -n "$PROJECT_DIR" ]] && candidates+=("$PROJECT_DIR/mindfs-service.sh" "$PROJECT_DIR/mindfs-service")
+  candidates+=("/opt/mindfs/bin/mindfs-service" "/usr/local/bin/mindfs-service")
+  for candidate in "${candidates[@]}"; do
+    [[ -f "$candidate" ]] || continue
+    SERVICE_SCRIPT="$candidate"
+    dir="$(cd -- "$(dirname -- "$candidate")" && pwd -P)"
+    while IFS= read -r line; do
+      case "$line" in
+        MINDFS_BIN=*) value="${line#*=}"; value="${value#\"}"; value="${value%\"}"; [[ "$value" == /* ]] && PREFIX="$(dirname "$(dirname "$value")")" ;;
+        WORKSPACE_ROOT=*) value="${line#*=}"; value="${value#\"}"; value="${value%\"}"; [[ "$PROJECT_DIR_SET" == 0 && "$value" == /* ]] && PROJECT_DIR="$value" ;;
+        SAFE_UPDATE_REPO_DIR=*) value="${line#*=}"; value="${value#\"}"; value="${value%\"}" ;;
+        MINDFS_CONFIG_DIR=*) value="${line#*=}"; value="${value#\"}"; value="${value%\"}"; [[ "$CONFIG_DIR_SET" == 0 && "$value" == /* ]] && CONFIG_DIR="$value" ;;
+        PID_FILE=*) value="${line#*=}"; value="${value#\"}"; value="${value%\"}"; RUNTIME_PID_FILE="$value" ;;
+      esac
+    done <"$candidate"
+    [[ "$PROJECT_DIR_SET" == 1 || -n "$PROJECT_DIR" ]] || PROJECT_DIR="$dir"
+    [[ "$HOME_DIR_SET" == 1 ]] || HOME_DIR="$(awk -F= '/^export HOME=|^HOME=/{gsub(/[\"'"'"' ]/, "", $2); print $2; exit}' "$candidate" 2>/dev/null || true)"
+    [[ -n "$HOME_DIR" ]] || HOME_DIR="$dir"
+    [[ "$CONFIG_DIR_SET" == 1 ]] || CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME_DIR/.config}/mindfs"
+    if [[ -n "$RUNTIME_PID_FILE" ]]; then
+      local pid
+      pid="$(read_pid_file "$RUNTIME_PID_FILE" 2>/dev/null || true)"
+      [[ -n "$pid" ]] && discover_from_process "$pid"
+    fi
+    RUNTIME_SERVICE_SCRIPT="$candidate"
+    RUNTIME_SOURCE="service script $candidate"
+    RUNTIME_DISCOVERED=1
+    return 0
+  done
+  return 1
+}
+
+discover_runtime() {
+  RUNTIME_DISCOVERED=0
+  if [[ "$MODE" == "backup" ]]; then
+    if [[ -n "$SERVICE_UNIT" ]] || systemd_is_running; then
+      discover_from_systemd || true
+    fi
+    [[ "$RUNTIME_DISCOVERED" == 1 ]] || discover_from_running_process || true
+    [[ "$RUNTIME_DISCOVERED" == 1 ]] || discover_from_pid_files || true
+    [[ "$RUNTIME_DISCOVERED" == 1 ]] || discover_from_service_script || true
+    if [[ "$RUNTIME_DISCOVERED" == 0 ]]; then
+      # A supplied path remains valid even when the service is currently down.
+      RUNTIME_SOURCE="explicit/default paths"
+    fi
+  fi
+  [[ -n "$CONFIG_DIR" ]] || CONFIG_DIR="${HOME_DIR}/.config/mindfs"
+  [[ -n "$PROJECT_DIR" ]] || PROJECT_DIR="${DATA_DIR}/workspace"
+  [[ -n "$SERVICE_SCRIPT" ]] || SERVICE_SCRIPT="$RUNTIME_SERVICE_SCRIPT"
+  [[ -n "$AGENT_CONFIG_PATH" ]] || AGENT_CONFIG_PATH="$(dirname -- "$SERVICE_SCRIPT")/mindfs-agents.json"
+  require_absolute_path DATA_DIR "$DATA_DIR"
+  require_absolute_path HOME_DIR "$HOME_DIR"
+  require_absolute_path CONFIG_DIR "$CONFIG_DIR"
+  require_absolute_path PROJECT_DIR "$PROJECT_DIR"
 }
 
 systemd_is_running() {
@@ -343,7 +720,7 @@ ensure_root() {
 ensure_dependencies() {
   local missing=()
   local command_name
-  for command_name in awk chown cp find grep id mkdir mv python3 sha256sum sort stat tar useradd; do
+  for command_name in awk chown cp find grep id mkdir mv python3 sha256sum sort stat tar useradd du; do
     command -v "$command_name" >/dev/null 2>&1 || missing+=("$command_name")
   done
   command -v curl >/dev/null 2>&1 || missing+=(curl)
@@ -402,29 +779,55 @@ select_service_mode() {
 }
 
 stop_existing_service() {
+  local service_status
   SERVICE_WAS_ACTIVE=0
   SERVICE_WAS_MODE=""
-  if command -v systemctl >/dev/null 2>&1 && systemd_is_running \
-    && systemctl is-active --quiet "${SERVICE_NAME}.service" 2>/dev/null; then
+  if [[ -n "$RUNTIME_UNIT" ]] && command -v systemctl >/dev/null 2>&1 \
+    && systemd_is_running \
+    && systemctl is-active --quiet "$RUNTIME_UNIT" 2>/dev/null; then
     SERVICE_WAS_ACTIVE=1
     SERVICE_WAS_MODE="systemd"
-    systemctl stop "${SERVICE_NAME}.service"
+    systemctl stop "$RUNTIME_UNIT"
     return
   fi
-  if [[ -x "$CONTROL_SCRIPT" ]] && "$CONTROL_SCRIPT" status 2>/dev/null | grep -q ' is active (pid '; then
+  if [[ -x "$SERVICE_SCRIPT" && "$SERVICE_SCRIPT" != "$CONTROL_SCRIPT" ]]; then
+    service_status="$($SERVICE_SCRIPT status 2>/dev/null || true)"
+    if [[ "$service_status" == *"正在运行"* || "$service_status" == *"active (pid "* || "$service_status" == *"is running"* ]]; then
+      SERVICE_WAS_ACTIVE=1
+      SERVICE_WAS_MODE="custom-script"
+      "$SERVICE_SCRIPT" stop
+      return
+    fi
+  fi
+  if [[ -x "$CONTROL_SCRIPT" ]]; then
+    service_status="$($CONTROL_SCRIPT status 2>/dev/null || true)"
+  else
+    service_status=""
+  fi
+  if [[ "$service_status" == *" is active (pid "* ]]; then
     SERVICE_WAS_ACTIVE=1
     SERVICE_WAS_MODE="background"
     "$CONTROL_SCRIPT" stop
+    return
   fi
+  # A discovered PID without a trustworthy controller is intentionally not
+  # killed. The archive can still be created after the user stops it, but the
+  # migration script must never guess at a process based only on its name.
 }
 
 restart_previous_service() {
   [[ "$SERVICE_WAS_ACTIVE" == 1 ]] || return 0
-  if [[ "$SERVICE_WAS_MODE" == "systemd" ]]; then
-    systemctl start "${SERVICE_NAME}.service"
-  elif [[ -x "$CONTROL_SCRIPT" ]]; then
-    "$CONTROL_SCRIPT" start
-  fi
+  case "$SERVICE_WAS_MODE" in
+    systemd)
+      systemctl start "${RUNTIME_UNIT:-${SERVICE_NAME}.service}"
+      ;;
+    background)
+      [[ -x "$CONTROL_SCRIPT" ]] && "$CONTROL_SCRIPT" start
+      ;;
+    custom-script)
+      [[ -x "$SERVICE_SCRIPT" ]] && "$SERVICE_SCRIPT" start
+      ;;
+  esac
 }
 
 cleanup() {
@@ -457,22 +860,32 @@ backup_archive() {
   mkdir -p -- "$BACKUP_DIR" "$(dirname "$final_archive")"
   STAGE_DIR="$(mktemp -d -p "${TMPDIR:-/tmp}" mindfs-migration.XXXXXX)"
   mkdir -p "$STAGE_DIR/mindfs-migration/payload/data"
-  : > "$STAGE_DIR/external-roots.tsv"
+  : > "$STAGE_DIR/root-list.tsv"
 
   select_service_mode
   detect_runtime
+  discover_runtime
+  log "Runtime discovery: ${RUNTIME_SOURCE}"
   stop_existing_service
-  [[ -d "$DATA_DIR" ]] || die "MindFS data directory not found: $DATA_DIR"
-  cp -a -- "$DATA_DIR/." "$STAGE_DIR/mindfs-migration/payload/data/"
-  rm -f -- "$STAGE_DIR/mindfs-migration/payload/data/mindfs.pid"
+  if [[ "$RUNTIME_DISCOVERED" == 1 && "$SERVICE_WAS_ACTIVE" != 1 ]]; then
+    die "发现运行中的 MindFS (PID ${RUNTIME_PID:-unknown})，但没有可验证的 service controller；为避免误停进程，请先停止它或提供 --service-script/--service-unit"
+  fi
+  [[ -d "$HOME_DIR" ]] || die "MindFS HOME directory not found: $HOME_DIR"
+  [[ -d "$CONFIG_DIR" ]] || die "MindFS config directory not found: $CONFIG_DIR"
   write_manifest
-
-  while IFS=$'\t' read -r archive_path source_path; do
-    [[ -n "$archive_path" && -n "$source_path" ]] || continue
-    mkdir -p "$STAGE_DIR/mindfs-migration/$archive_path"
-    cp -a -- "$source_path/." "$STAGE_DIR/mindfs-migration/$archive_path/"
-  done < "$STAGE_DIR/external-roots.tsv"
-  rm -f -- "$STAGE_DIR/external-roots.tsv"
+  if [[ "$METADATA_ONLY" == 1 ]]; then
+    copy_metadata_payload
+  else
+    [[ -d "$DATA_DIR" ]] || die "MindFS data directory not found: $DATA_DIR"
+    cp -a -- "$DATA_DIR/." "$STAGE_DIR/mindfs-migration/payload/data/"
+    rm -f -- "$STAGE_DIR/mindfs-migration/payload/data/mindfs.pid"
+    while IFS=$'\t' read -r archive_path source_path; do
+      [[ -n "$archive_path" && -n "$source_path" ]] || continue
+      mkdir -p "$STAGE_DIR/mindfs-migration/$archive_path"
+      cp -a -- "$source_path/." "$STAGE_DIR/mindfs-migration/$archive_path/"
+    done < "$STAGE_DIR/root-list.tsv"
+  fi
+  rm -f -- "$STAGE_DIR/root-list.tsv"
 
   local raw_archive="$STAGE_DIR/mindfs-migration.tar.gz"
   tar --xattrs --acls --numeric-owner -C "$STAGE_DIR" -czf "$raw_archive" mindfs-migration
@@ -494,19 +907,96 @@ backup_archive() {
   printf '  Warning:  this archive contains credentials and pairing keys.\n'
 }
 
+copy_dir_contents() {
+  local source="$1"
+  local archive_path="$2"
+  local destination="$STAGE_DIR/mindfs-migration/$archive_path"
+  [[ -d "$source" ]] || return 0
+  mkdir -p "$destination"
+  cp -a -- "$source/." "$destination/"
+}
+
+copy_file_if_present() {
+  local source="$1"
+  local archive_path="$2"
+  local destination="$STAGE_DIR/mindfs-migration/$archive_path"
+  [[ -f "$source" || -L "$source" ]] || return 0
+  mkdir -p "$(dirname "$destination")"
+  cp -a -- "$source" "$destination"
+}
+
+copy_metadata_payload() {
+  local archive_path source_path
+
+  copy_dir_contents "$CONFIG_DIR" "payload/data/config/mindfs"
+  copy_file_if_present "$SCRIPT_DIR/../mindfs/mindfs-agents.json" "payload/data/mindfs-agents.json"
+  copy_file_if_present "$(dirname "$SERVICE_SCRIPT")/mindfs-agents.json" "payload/data/mindfs-agents.json"
+
+  while IFS=$'\t' read -r archive_path source_path; do
+    [[ -n "$archive_path" && -n "$source_path" ]] || continue
+    [[ -d "$source_path/.mindfs" ]] || continue
+    copy_dir_contents "$source_path/.mindfs" "$archive_path/.mindfs"
+  done < "$STAGE_DIR/root-list.tsv"
+
+  [[ "$INCLUDE_AGENT_DATA" == 1 ]] || return 0
+
+  # Codex: retain credentials/configuration and real sessions, but not the
+  # multi-gigabyte package cache, operational log database, or temp files.
+  local codex="$HOME_DIR/.codex"
+  copy_dir_contents "$codex/sessions" "payload/data/.codex/sessions"
+  copy_dir_contents "$codex/agents" "payload/data/.codex/agents"
+  copy_dir_contents "$codex/rules" "payload/data/.codex/rules"
+  copy_dir_contents "$codex/skills" "payload/data/.codex/skills"
+  for source_path in "$codex"/auth*.json "$codex"/config*.toml "$codex"/AGENTS.md \
+    "$codex"/history.jsonl "$codex"/installation_id "$codex"/version.json; do
+    [[ -e "$source_path" ]] || continue
+    copy_file_if_present "$source_path" "payload/data/.codex/$(basename "$source_path")"
+  done
+
+  # Claude: retain project conversation JSONL files and user configuration;
+  # exclude file-history, caches, plugins, downloads, and session environments.
+  local claude="$HOME_DIR/.claude"
+  copy_dir_contents "$claude/projects" "payload/data/.claude/projects"
+  copy_dir_contents "$claude/agents" "payload/data/.claude/agents"
+  copy_dir_contents "$claude/commands" "payload/data/.claude/commands"
+  copy_dir_contents "$claude/hooks" "payload/data/.claude/hooks"
+  copy_dir_contents "$claude/rules" "payload/data/.claude/rules"
+  copy_dir_contents "$claude/skills" "payload/data/.claude/skills"
+  for source_path in "$HOME_DIR"/.claude.json "$claude"/history.jsonl "$claude"/settings.json; do
+    copy_file_if_present "$source_path" "payload/data/.claude/$(basename "$source_path")"
+  done
+
+  # Keep only the Grok configuration when present; the rest of ~/.grok may
+  # contain a large installed binary/cache tree.
+  copy_file_if_present "$HOME_DIR/.grok/config.toml" "payload/data/.grok/config.toml"
+
+}
+
 print_backup_plan() {
   select_service_mode
   detect_runtime
+  discover_runtime
   cat <<EOF
 MindFS backup plan (dry run)
 
   source data:   ${DATA_DIR}
+  runtime source: ${RUNTIME_SOURCE}
+  runtime PID:    ${RUNTIME_PID:-not running}
   startup root:  ${PROJECT_DIR}
   archive:       ${ARCHIVE_PATH}
   service mode:  ${SERVICE_MODE}
   listen:        ${BIND_ADDR}:${PORT}
   TLS / E2EE:    ${ENABLE_TLS} / ${ENABLE_E2EE}
   Relay:         $([[ "${NO_RELAYER}" == 1 ]] && printf 'disabled' || printf 'enabled')
+  mode:          $([[ "${METADATA_ONLY}" == 1 ]] && printf 'metadata-only' || printf 'full data')
+  agent data:    $([[ "${INCLUDE_AGENT_DATA}" == 1 ]] && printf 'included' || printf 'excluded')
+
+  config size:   $(du -sh "$CONFIG_DIR" 2>/dev/null | awk '{print $1}' || printf 'unknown')
+  home:          ${HOME_DIR}
+  config:        ${CONFIG_DIR}
+  service script:${SERVICE_SCRIPT:-not found}
+  service unit:  ${RUNTIME_UNIT:-not found}
+  excluded:      source code, .git, dependencies, caches, .codex/packages, .codex/logs_2.sqlite*
 
 No service, data, archive, package, or user changes will be made.
 EOF
@@ -618,7 +1108,6 @@ PY
   [[ "$ENABLE_E2EE_SET" == 1 ]] || ENABLE_E2EE="$source_e2ee"
   [[ "$NO_RELAYER_SET" == 1 ]] || NO_RELAYER="$source_no_relayer"
 
-  CONFIG_HOME="${DATA_DIR}/config/mindfs"
   START_SCRIPT="${PREFIX}/bin/mindfs-vps-start"
   CONTROL_SCRIPT="${PREFIX}/bin/mindfs-service"
   ROLLBACK_DIR="/var/backups/mindfs-restore-$(date -u +%Y%m%dT%H%M%SZ)"
@@ -695,9 +1184,9 @@ restore_external_projects() {
   [[ -d "$projects_root" ]] || return 0
   mkdir -p "$PROJECTS_DIR"
   while IFS= read -r -d '' source_dir; do
-    local project_name destination
+    local project_name destination project_kind
     project_name="$(basename "$source_dir")"
-    destination="$(python3 - "$RESTORE_PLAN" "$project_name" "$PROJECTS_DIR" <<'PY'
+    IFS=$'\t' read -r project_kind destination < <(python3 - "$RESTORE_PLAN" "$project_name" "$PROJECTS_DIR" <<'PY'
 import json
 import os
 import sys
@@ -707,22 +1196,33 @@ with open(plan_path, encoding="utf-8") as stream:
     plan = json.load(stream)
 for item in plan.get("roots", []):
     if os.path.basename(item.get("archive_path", "")) == archive_name:
-        print(item["destination"])
+        print("\t".join((str(item.get("kind", "")), item["destination"])))
         break
 else:
-    print(os.path.join(projects_dir, archive_name))
+    print("\t".join(("", os.path.join(projects_dir, archive_name))))
 PY
-    )"
+    )
     [[ "$project_name" == root-* ]] || continue
     [[ -n "$destination" && "$destination" == /* ]] || die "invalid external project destination"
     if [[ -e "$destination" ]]; then
       [[ -d "$destination" ]] || die "external project destination is not a directory: $destination"
-      [[ -z "$(find "$destination" -mindepth 1 -maxdepth 1 -print -quit)" ]] || die "external project destination is not empty: $destination"
+      if [[ "$project_kind" == "metadata" ]]; then
+        # Metadata-only projects carry just .mindfs; the user re-provisions the
+        # source tree, so a populated destination is expected — but never
+        # overwrite existing MindFS metadata.
+        [[ ! -e "$destination/.mindfs" ]] || die "external project destination already has .mindfs metadata: $destination"
+      else
+        [[ -z "$(find "$destination" -mindepth 1 -maxdepth 1 -print -quit)" ]] || die "external project destination is not empty: $destination"
+      fi
     else
       mkdir -p "$destination"
     fi
     cp -a -- "$source_dir/." "$destination/"
-    chown -R "$SERVICE_USER:$SERVICE_GROUP" "$destination"
+    if [[ "$project_kind" == "metadata" && -d "$destination/.mindfs" ]]; then
+      chown -R "$SERVICE_USER:$SERVICE_GROUP" "$destination/.mindfs"
+    else
+      chown -R "$SERVICE_USER:$SERVICE_GROUP" "$destination"
+    fi
   done < <(find "$projects_root" -mindepth 1 -maxdepth 1 -type d -print0 | sort -z)
 }
 
@@ -1166,6 +1666,7 @@ restore_archive() {
   restore_service
   [[ -d "$DATA_DIR" ]] || die "deployment did not create data directory: $DATA_DIR"
   cp -a -- "$RESTORE_ARCHIVE_ROOT/payload/data/." "$DATA_DIR/"
+  restore_agent_payload
   restore_external_projects
   rewrite_restored_paths
   chown -R "$SERVICE_USER:$SERVICE_GROUP" "$DATA_DIR"
@@ -1184,6 +1685,17 @@ restore_archive() {
     printf '  Service:   %s status\n' "$CONTROL_SCRIPT"
   fi
   printf '  Warning:   verify conversations, credentials, and agent CLI access before removing rollback data.\n'
+}
+
+restore_agent_payload() {
+  local target_home="$HOME_DIR"
+  [[ -d "$RESTORE_ARCHIVE_ROOT/payload/data/.codex" ]] || return 0
+  mkdir -p "$target_home"
+  cp -a -- "$RESTORE_ARCHIVE_ROOT/payload/data/.codex" "$target_home/"
+  [[ ! -d "$RESTORE_ARCHIVE_ROOT/payload/data/.claude" ]] || cp -a -- "$RESTORE_ARCHIVE_ROOT/payload/data/.claude" "$target_home/"
+  [[ ! -f "$RESTORE_ARCHIVE_ROOT/payload/data/.claude.json" ]] || cp -a -- "$RESTORE_ARCHIVE_ROOT/payload/data/.claude.json" "$target_home/"
+  [[ ! -d "$RESTORE_ARCHIVE_ROOT/payload/data/.grok" ]] || cp -a -- "$RESTORE_ARCHIVE_ROOT/payload/data/.grok" "$target_home/"
+  chown -R "$SERVICE_USER:$SERVICE_GROUP" "$target_home/.codex" "$target_home/.claude" "$target_home/.grok" "$target_home/.claude.json" 2>/dev/null || true
 }
 
 main() {
@@ -1360,17 +1872,20 @@ PY
 }
 
 write_manifest() {
-  python3 - "$DATA_DIR" "$PROJECT_DIR" "$PREFIX" "$SERVICE_NAME" "$SERVICE_USER" "$SERVICE_MODE" "$BIND_ADDR" "$PORT" "$ENABLE_TLS" "$ENABLE_E2EE" "$NO_RELAYER" "$CONFIG_HOME" "$STAGE_DIR/mindfs-migration/manifest.json" "$STAGE_DIR/external-roots.tsv" <<'PY'
+  python3 - "$DATA_DIR" "$HOME_DIR" "$CONFIG_DIR" "$PROJECT_DIR" "$PREFIX" "$SERVICE_NAME" "$SERVICE_USER" "$SERVICE_MODE" "$BIND_ADDR" "$PORT" "$ENABLE_TLS" "$ENABLE_E2EE" "$NO_RELAYER" "$METADATA_ONLY" "$INCLUDE_AGENT_DATA" "$STAGE_DIR/mindfs-migration/manifest.json" "$STAGE_DIR/root-list.tsv" <<'PY'
 import datetime
 import json
 import os
 import sys
 
-(data_dir, project_dir, prefix, service_name, service_user, service_mode,
- bind, port, tls, e2ee, no_relayer, config_home, manifest_path,
- external_list) = sys.argv[1:]
+(data_dir, home_dir, config_dir, project_dir, prefix, service_name, service_user,
+ service_mode, bind, port, tls, e2ee, no_relayer, metadata_only,
+ include_agent_data, manifest_path, root_list) = sys.argv[1:]
 data_dir = os.path.abspath(os.path.normpath(data_dir))
+home_dir = os.path.abspath(os.path.normpath(home_dir))
+config_dir = os.path.abspath(os.path.normpath(config_dir))
 project_dir = os.path.abspath(os.path.normpath(project_dir))
+metadata_only = metadata_only == "1"
 
 def within(path, parent):
     try:
@@ -1378,67 +1893,76 @@ def within(path, parent):
     except ValueError:
         return False
 
-registry_path = os.path.join(config_home, "registry.json")
+def checked_path(value, label):
+    if any(char in value for char in ("\n", "\r", "\t")):
+        raise SystemExit(f"{label} contains a control character")
+    if not os.path.isabs(value):
+        raise SystemExit(f"{label} must be absolute: {value}")
+    return os.path.abspath(os.path.normpath(value))
+
+registry_path = os.path.join(config_dir, "registry.json")
 stored = {"dirs": [], "order": []}
 if os.path.isfile(registry_path):
     with open(registry_path, encoding="utf-8") as stream:
         stored = json.load(stream)
 
 roots = []
+seen = set()
 for item in stored.get("dirs", []):
     raw_path = str(item.get("root_path", "")).strip()
     if not raw_path:
         continue
-    if any(char in raw_path for char in ("\n", "\r", "\t")):
-        raise SystemExit("project path contains a control character")
-    if not os.path.isabs(raw_path):
-        raise SystemExit(f"project root must be absolute: {raw_path}")
-    path = os.path.abspath(os.path.normpath(raw_path))
+    path = checked_path(raw_path, "project root")
+    if path in seen:
+        continue
+    seen.add(path)
     roots.append({
         "id": str(item.get("id", "")),
         "name": str(item.get("name", "")),
         "path": path,
         "registered": True,
     })
-if any(char in project_dir for char in ("\n", "\r", "\t")):
-    raise SystemExit("project path contains a control character")
-if not os.path.isabs(project_dir):
-    raise SystemExit(f"project root must be absolute: {project_dir}")
-if not any(item["path"] == project_dir for item in roots):
+if project_dir not in seen:
     roots.append({
         "id": "",
         "name": os.path.basename(project_dir),
-        "path": project_dir,
+        "path": checked_path(project_dir, "startup project"),
         "registered": False,
     })
 roots.sort(key=lambda item: (len(item["path"]), item["path"]))
 
-for index, item in enumerate(roots, 1):
-    if not os.path.isdir(item["path"]):
-        raise SystemExit(f"project root does not exist: {item['path']}")
-    if any(
-        item["path"] != prior["path"] and within(item["path"], prior["path"])
-        for prior in roots[:index - 1]
-    ):
-        raise SystemExit(f"nested project roots are not supported: {item['path']}")
-    relative = os.path.relpath(item["path"], data_dir)
-    if within(item["path"], data_dir):
-        item["kind"] = "data"
-        item["archive_path"] = ""
-    else:
-        item["kind"] = "external"
-        item["archive_path"] = f"payload/projects/root-{index:04d}"
-        with open(external_list, "a", encoding="utf-8") as stream:
-            stream.write(f"{item['archive_path']}\t{item['path']}\n")
-    item["relative_path"] = "." if relative == "." else relative
+with open(root_list, "w", encoding="utf-8") as listing:
+    for index, item in enumerate(roots, 1):
+        if not os.path.isdir(item["path"]):
+            raise SystemExit(f"project root does not exist: {item['path']}")
+        if metadata_only:
+            item["kind"] = "metadata"
+            item["archive_path"] = f"payload/projects/root-{index:04d}"
+            listing.write(f"{item['archive_path']}\t{item['path']}\n")
+        else:
+            relative = os.path.relpath(item["path"], data_dir)
+            if within(item["path"], data_dir):
+                item["kind"] = "data"
+                item["archive_path"] = ""
+            else:
+                item["kind"] = "external"
+                item["archive_path"] = f"payload/projects/root-{index:04d}"
+                listing.write(f"{item['archive_path']}\t{item['path']}\n")
+            item["relative_path"] = "." if relative == "." else relative
 
 manifest = {
     "format": "mindfs-vps-migration",
     "format_version": 1,
     "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    "scope": {
+        "metadata_only": metadata_only,
+        "include_agent_data": include_agent_data == "1",
+        "excludes": ["project source", ".git", "dependencies", "caches", ".codex/packages", ".codex/logs_2.sqlite*"],
+    },
     "runtime": {
         "data_dir": data_dir,
-        "config_dir": os.path.abspath(os.path.normpath(config_home)),
+        "home_dir": home_dir,
+        "config_dir": config_dir,
         "project_dir": project_dir,
         "prefix": prefix,
         "service_name": service_name,
@@ -1456,8 +1980,9 @@ manifest = {
         "original_path": item["path"],
         "registered": item["registered"],
         "kind": item["kind"],
-        "relative_path": item["relative_path"],
+        "relative_path": item.get("relative_path", "."),
         "archive_path": item["archive_path"],
+        "has_metadata": os.path.isdir(os.path.join(item["path"], ".mindfs")),
     } for item in roots],
 }
 

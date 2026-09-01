@@ -8,15 +8,15 @@
 #
 # Usage:
 #   bash deploy-vps.sh [options]
-#   curl -fsSL https://raw.githubusercontent.com/a9gent/mindfs/main/scripts/deploy-vps.sh | sudo bash -s --
+#   curl -fsSL https://raw.githubusercontent.com/linbmv/mindfs/custom/mindfs-local/scripts/deploy-vps.sh | sudo bash -s --
 set -Eeuo pipefail
 
 umask 077
 
-REPO="${MINDFS_REPO:-a9gent/mindfs}"
-VERSION="${MINDFS_VERSION:-}"
 PREFIX="${MINDFS_PREFIX:-/opt/mindfs}"
 DATA_DIR="${MINDFS_DATA_DIR:-/var/lib/mindfs}"
+HOME_DIR="${MINDFS_HOME_DIR:-${DATA_DIR}}"
+CONFIG_DIR="${MINDFS_CONFIG_DIR:-${DATA_DIR}/config/mindfs}"
 PROJECT_DIR="${MINDFS_PROJECT_DIR:-}"
 SERVICE_NAME="${MINDFS_SERVICE_NAME:-mindfs}"
 SERVICE_USER="${MINDFS_SERVICE_USER:-mindfs}"
@@ -27,11 +27,14 @@ ENABLE_E2EE="${MINDFS_ENABLE_E2EE:-1}"
 NO_RELAYER="${MINDFS_NO_RELAYER:-0}"
 OPEN_FIREWALL="${MINDFS_OPEN_FIREWALL:-0}"
 INIT_MODE="${MINDFS_INIT_MODE:-auto}"
+SOURCE_REPO_URL="${MINDFS_SOURCE_REPO_URL:-https://github.com/linbmv/mindfs.git}"
+SOURCE_BRANCH="${MINDFS_SOURCE_BRANCH:-custom/mindfs-local}"
+SOURCE_DIR="${MINDFS_SOURCE_DIR:-/opt/mindfs-src}"
 DRY_RUN=0
 SKIP_START=0
 
-CONFIG_HOME="${DATA_DIR}/config"
-STATE_HOME="${DATA_DIR}/.local/share"
+CONFIG_HOME=""
+STATE_HOME=""
 START_SCRIPT="${PREFIX}/bin/mindfs-vps-start"
 UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
 PID_FILE="${DATA_DIR}/mindfs.pid"
@@ -46,6 +49,10 @@ SCRIPT_DIR=""
 if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fi
+
+SOURCE_DIR_EXPLICIT=0
+[[ -n "${MINDFS_SOURCE_DIR:-}" ]] && SOURCE_DIR_EXPLICIT=1
+IN_TREE_BUILD=0
 
 log() {
   printf '[mindfs-vps] %s\n' "$*"
@@ -64,14 +71,19 @@ usage() {
   cat <<'EOF'
 MindFS VPS deployment
 
-Installs the latest released MindFS binary and creates a service.
+Builds MindFS from source on this host and creates a service.
+No prebuilt binary is ever downloaded. Requires go, npm, git and make.
 The service is independent of the directory from which this script is run.
 
 Options:
-  --version VERSION       Install a specific release, for example v0.4.5
-  --repo OWNER/REPO       Release repository (default: a9gent/mindfs)
+  --source-repo URL       Git remote to build from
+                          (default: https://github.com/linbmv/mindfs.git)
+  --source-branch NAME    Branch to build (default: custom/mindfs-local)
+  --source-dir PATH       Checkout location (default: /opt/mindfs-src)
   --prefix PATH           Binary install prefix (default: /opt/mindfs)
   --data-dir PATH         Service home and persistent config (default: /var/lib/mindfs)
+  --home-dir PATH         HOME for the service user (default: DATA_DIR)
+  --config-dir PATH       MindFS config directory (default: DATA_DIR/config/mindfs)
   --project-dir PATH      Initial managed project directory
                           (default: /var/lib/mindfs/workspace)
   --service-name NAME     service name (default: mindfs)
@@ -100,16 +112,6 @@ need_value() {
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --version)
-        need_value "$@"
-        VERSION="$2"
-        shift 2
-        ;;
-      --repo)
-        need_value "$@"
-        REPO="$2"
-        shift 2
-        ;;
       --prefix)
         need_value "$@"
         PREFIX="$2"
@@ -118,6 +120,16 @@ parse_args() {
       --data-dir)
         need_value "$@"
         DATA_DIR="$2"
+        shift 2
+        ;;
+      --home-dir)
+        need_value "$@"
+        HOME_DIR="$2"
+        shift 2
+        ;;
+      --config-dir)
+        need_value "$@"
+        CONFIG_DIR="$2"
         shift 2
         ;;
       --project-dir)
@@ -182,6 +194,26 @@ parse_args() {
         OPEN_FIREWALL=1
         shift
         ;;
+      --from-source)
+        # Accepted for compatibility; building from source is the only mode.
+        shift
+        ;;
+      --source-repo)
+        need_value "$@"
+        SOURCE_REPO_URL="$2"
+        shift 2
+        ;;
+      --source-branch)
+        need_value "$@"
+        SOURCE_BRANCH="$2"
+        shift 2
+        ;;
+      --source-dir)
+        need_value "$@"
+        SOURCE_DIR="$2"
+        SOURCE_DIR_EXPLICIT=1
+        shift 2
+        ;;
       --dry-run)
         DRY_RUN=1
         shift
@@ -210,19 +242,35 @@ require_absolute_path() {
 
 validate_config() {
   [[ -n "$PROJECT_DIR" ]] && : || PROJECT_DIR="${DATA_DIR}/workspace"
-  CONFIG_HOME="${DATA_DIR}/config"
-  STATE_HOME="${DATA_DIR}/.local/share"
+  CONFIG_HOME="$(dirname "$CONFIG_DIR")"
+  STATE_HOME="${HOME_DIR}/.local/share"
   START_SCRIPT="${PREFIX}/bin/mindfs-vps-start"
   UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
   PID_FILE="${DATA_DIR}/mindfs.pid"
   LOG_FILE="${DATA_DIR}/mindfs.log"
   CONTROL_SCRIPT="${PREFIX}/bin/mindfs-service"
 
+  # Build the checkout this script came from, unless the caller named a
+  # different source directory. Piped runs (curl | bash) have no SCRIPT_DIR and
+  # fall through to the clone path.
+  if [[ "$SOURCE_DIR_EXPLICIT" == 0 && -n "$SCRIPT_DIR" ]]; then
+    local in_tree_root
+    in_tree_root="$(cd "$SCRIPT_DIR/.." && pwd)"
+    if [[ -d "$in_tree_root/.git" && -f "$in_tree_root/Makefile" && -d "$in_tree_root/cli/cmd" ]]; then
+      IN_TREE_BUILD=1
+      SOURCE_DIR="$in_tree_root"
+    fi
+  fi
+
   require_absolute_path PREFIX "$PREFIX"
   require_absolute_path DATA_DIR "$DATA_DIR"
+  require_absolute_path HOME_DIR "$HOME_DIR"
+  require_absolute_path CONFIG_DIR "$CONFIG_DIR"
   require_absolute_path PROJECT_DIR "$PROJECT_DIR"
 
-  [[ "$REPO" =~ ^[^/[:space:]]+/[^/[:space:]]+$ ]] || die "invalid repository: $REPO"
+  require_absolute_path SOURCE_DIR "$SOURCE_DIR"
+  [[ -n "$SOURCE_REPO_URL" ]] || die "--source-repo must not be empty"
+  [[ -n "$SOURCE_BRANCH" ]] || die "--source-branch must not be empty"
   [[ "$SERVICE_NAME" =~ ^[A-Za-z0-9_.@-]+$ ]] || die "invalid service name: $SERVICE_NAME"
   [[ "$SERVICE_USER" =~ ^[A-Za-z_][A-Za-z0-9_-]*$ ]] || die "invalid service user: $SERVICE_USER"
   [[ "$PORT" =~ ^[0-9]+$ && "$PORT" -ge 1 && "$PORT" -le 65535 ]] || die "invalid port: $PORT"
@@ -305,8 +353,10 @@ systemd_quote() {
 print_plan() {
   cat <<EOF
 Deployment plan (dry run)
-  repository:    ${REPO}
-  version:       ${VERSION:-latest}
+  install source: local build (no prebuilt binary is ever downloaded)
+  build mode:    $(if [[ "$IN_TREE_BUILD" == 1 ]]; then printf 'in-tree (this checkout, git untouched)'; else printf 'clone/pull %s (%s)' "$SOURCE_REPO_URL" "$SOURCE_BRANCH"; fi)
+  checkout dir:  ${SOURCE_DIR}
+  version:       from git describe
   prefix:        ${PREFIX}
   data directory: ${DATA_DIR}
   project root:  ${PROJECT_DIR}
@@ -330,15 +380,21 @@ ensure_root() {
 ensure_dependencies() {
   local missing=()
   local command_name
-  for command_name in curl tar install useradd id stat runuser; do
+  local packages=(curl ca-certificates tar util-linux git make)
+  local required=(curl tar install useradd id stat runuser git make)
+  for command_name in "${required[@]}"; do
     command -v "$command_name" >/dev/null 2>&1 || missing+=("$command_name")
   done
   if ((${#missing[@]} > 0)); then
     command -v apt-get >/dev/null 2>&1 || die "missing commands (${missing[*]}) and apt-get is unavailable"
-    log "Installing required packages: curl ca-certificates tar util-linux"
+    log "Installing required packages: ${packages[*]}"
     DEBIAN_FRONTEND=noninteractive apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y curl ca-certificates tar util-linux
+    DEBIAN_FRONTEND=noninteractive apt-get install -y "${packages[@]}"
   fi
+  for command_name in go npm; do
+    command -v "$command_name" >/dev/null 2>&1 ||
+      die "building from source needs ${command_name}; install a current version (distro packages are often too old) before rerunning"
+  done
 }
 
 ensure_service_user() {
@@ -354,6 +410,7 @@ ensure_service_user() {
   SERVICE_GROUP="$(id -gn "$SERVICE_USER")"
 
   ensure_owned_dir "$DATA_DIR" 0750 "$service_uid" "$service_gid"
+  ensure_owned_dir "$HOME_DIR" 0750 "$service_uid" "$service_gid"
   ensure_owned_dir "$CONFIG_HOME" 0700 "$service_uid" "$service_gid"
   ensure_owned_dir "$STATE_HOME" 0750 "$service_uid" "$service_gid"
   ensure_owned_dir "$PROJECT_DIR" 0750 "$service_uid" "$service_gid"
@@ -383,48 +440,33 @@ ensure_owned_dir() {
   chmod "$mode" "$path"
 }
 
-download_installer() {
-  local output_path="$1"
-  if [[ -n "$SCRIPT_DIR" && -f "${SCRIPT_DIR}/install.sh" ]]; then
-    cp "${SCRIPT_DIR}/install.sh" "$output_path"
-    chmod 0700 "$output_path"
-    return
-  fi
-  curl -fsSL "https://raw.githubusercontent.com/${REPO}/main/scripts/install.sh" -o "$output_path"
-  chmod 0700 "$output_path"
-}
+build_from_source() {
+  local source_dir="$1"
+  local command_name
+  for command_name in git go npm make; do
+    command -v "$command_name" >/dev/null 2>&1 ||
+      die "building from source requires ${command_name}; install it before rerunning"
+  done
 
-installer_supports_repo() {
-  local installer_path="$1"
-  # Older published installers hard-code a9gent/mindfs and reject unknown
-  # options. Keep the VPS deploy script usable while those installers are
-  # still being served from a release branch or a gist.
-  grep -Eq '^[[:space:]]*--repo[[:space:]]*\)' "$installer_path"
+  if [[ "$IN_TREE_BUILD" == 1 ]]; then
+    log "Building the checkout this script came from: ${source_dir}"
+    log "Leaving git alone; run 'git pull' yourself to change the revision"
+  elif [[ ! -d "$source_dir/.git" ]]; then
+    log "Cloning ${SOURCE_REPO_URL} (${SOURCE_BRANCH}) into ${source_dir}"
+    git clone --branch "$SOURCE_BRANCH" -- "$SOURCE_REPO_URL" "$source_dir"
+  else
+    log "Updating existing checkout at ${source_dir}"
+    git -C "$source_dir" fetch --prune origin
+    git -C "$source_dir" checkout "$SOURCE_BRANCH"
+    git -C "$source_dir" pull --ff-only
+  fi
+
+  log "Building web assets and binary, then installing into ${PREFIX} (takes a few minutes)"
+  make -C "$source_dir" install PREFIX="$PREFIX"
 }
 
 install_mindfs() {
-  local installer_path
-  installer_path="$(mktemp)"
-  download_installer "$installer_path"
-
-  local installer_args=(--prefix "$PREFIX")
-  if installer_supports_repo "$installer_path"; then
-    installer_args=(--repo "$REPO" "${installer_args[@]}")
-  elif [[ "$REPO" != "a9gent/mindfs" ]]; then
-    rm -f "$installer_path"
-    die "the downloaded installer does not support --repo; use the current installer from ${REPO} or omit --repo"
-  else
-    log "Downloaded installer has no --repo option; using its default repository"
-  fi
-  if [[ -n "$VERSION" ]]; then
-    installer_args+=(--version "$VERSION")
-  fi
-  log "Installing MindFS release ${VERSION:-latest} into ${PREFIX}"
-  if ! PATH="${PREFIX}/bin:${PATH}" MINDFS_REPO="$REPO" bash "$installer_path" "${installer_args[@]}"; then
-    rm -f "$installer_path"
-    return 1
-  fi
-  rm -f "$installer_path"
+  build_from_source "$SOURCE_DIR"
   [[ -x "${PREFIX}/bin/mindfs" ]] || die "MindFS binary was not installed at ${PREFIX}/bin/mindfs"
 }
 
@@ -451,6 +493,7 @@ write_background_control_script() {
     printf 'SERVICE_GROUP=%s\n' "$(shell_quote "$SERVICE_GROUP")"
     printf 'DATA_DIR=%s\n' "$(shell_quote "$DATA_DIR")"
     printf 'CONFIG_HOME=%s\n' "$(shell_quote "$CONFIG_HOME")"
+    printf 'HOME_DIR=%s\n' "$(shell_quote "$HOME_DIR")"
     printf 'START_SCRIPT=%s\n' "$(shell_quote "$START_SCRIPT")"
     printf 'BIN_PATH=%s\n' "$(shell_quote "${PREFIX}/bin/mindfs")"
     printf 'PID_FILE=%s\n' "$(shell_quote "$PID_FILE")"
@@ -498,7 +541,7 @@ start_service() {
   chown "$SERVICE_USER:$SERVICE_GROUP" "$LOG_FILE"
   chmod 0640 "$LOG_FILE"
   nohup runuser -u "$SERVICE_USER" -- env \
-    HOME="$DATA_DIR" \
+    HOME="$HOME_DIR" \
     XDG_CONFIG_HOME="$CONFIG_HOME" \
     PATH="$PATH_VALUE" \
     "$START_SCRIPT" >>"$LOG_FILE" 2>&1 </dev/null &
@@ -573,7 +616,7 @@ write_systemd_unit() {
     printf 'User=%s\n' "$SERVICE_USER"
     printf 'Group=%s\n' "$SERVICE_GROUP"
     printf 'WorkingDirectory=%s\n' "$(systemd_quote "$PROJECT_DIR")"
-    printf 'Environment=HOME=%s\n' "$(systemd_quote "$DATA_DIR")"
+    printf 'Environment=HOME=%s\n' "$(systemd_quote "$HOME_DIR")"
     printf 'Environment=XDG_CONFIG_HOME=%s\n' "$(systemd_quote "$CONFIG_HOME")"
     printf 'Environment=PATH=%s\n' "$(systemd_quote "${PREFIX}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")"
     printf 'ExecStart=%s\n' "$(systemd_quote "$START_SCRIPT")"
@@ -629,7 +672,7 @@ configure_firewall() {
 }
 
 pairing_secret() {
-  local config_file="${CONFIG_HOME}/mindfs/e2ee.json"
+  local config_file="${CONFIG_DIR}/e2ee.json"
   [[ -r "$config_file" ]] || return 0
   awk -F'"' '/"pairing_secret"[[:space:]]*:/ { print $4; exit }' "$config_file"
 }
@@ -655,6 +698,8 @@ print_summary() {
     printf '  Note:        systemd is unavailable; this process will not auto-start after a host reboot\n'
   fi
   printf '  Data:        %s\n' "$DATA_DIR"
+  printf '  HOME:        %s\n' "$HOME_DIR"
+  printf '  Config:      %s\n' "$CONFIG_DIR"
   printf '  Project:     %s\n' "$PROJECT_DIR"
   printf '  Health:      %s\n' "$HEALTH_URL"
 
@@ -671,12 +716,12 @@ print_summary() {
   if [[ "$ENABLE_E2EE" == 1 ]]; then
     local secret
     secret="$(pairing_secret || true)"
-    printf '  Pairing file: %s/config/mindfs/e2ee.json\n' "$DATA_DIR"
+    printf '  Pairing file: %s\n' "$CONFIG_DIR/e2ee.json"
     if [[ -n "$secret" ]]; then
       printf '  Pairing code: %s\n' "$secret"
       printf '  Keep this code private; it is required to unlock the web UI.\n'
     else
-      warn "pairing code was not readable; inspect ${CONFIG_HOME}/mindfs/e2ee.json as root"
+      warn "pairing code was not readable; inspect ${CONFIG_DIR}/e2ee.json as root"
     fi
   else
     warn "E2EE is disabled; do not expose this service directly to the public internet"

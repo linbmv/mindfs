@@ -177,18 +177,28 @@ make build      # output: ./mindfs
 
 ### One-command deployment on a fresh VPS
 
-On a Debian/Ubuntu VPS, deploy without relying on the current checkout directory and without Docker, Node.js, or Go:
+On a Debian/Ubuntu VPS, deploy without relying on the current checkout directory:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/a9gent/mindfs/main/scripts/deploy-vps.sh | sudo bash -s --
+curl -fsSL https://raw.githubusercontent.com/linbmv/mindfs/custom/mindfs-local/scripts/deploy-vps.sh | sudo bash -s --
 ```
+
+This always builds on the machine; no prebuilt binary is ever downloaded. Piped like above it clones `custom/mindfs-local` into `/opt/mindfs-src` and builds that, so a fresh install gets the current branch state rather than a published release. Run the script from inside an existing checkout instead and it builds that checkout in place, leaving git untouched:
+
+```bash
+git clone https://github.com/linbmv/mindfs.git && cd mindfs
+git checkout custom/mindfs-local
+sudo bash scripts/deploy-vps.sh
+```
+
+Either way the VPS needs `git`, `make`, Go, and Node.js. `git` and `make` are installed automatically; Go and Node must already be present because distribution packages are usually too old. Add `--dry-run` to print the plan without changing anything.
 
 The script installs the binary under `/opt/mindfs`, creates an isolated `mindfs` system user and `mindfs.service`, stores persistent state under `/var/lib/mindfs`, and manages `/var/lib/mindfs/workspace` as the initial project root. It listens on `0.0.0.0:7331` with self-signed HTTPS and E2EE pairing enabled by default.
 
 Use independent paths or keep the service private behind an SSH tunnel:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/a9gent/mindfs/main/scripts/deploy-vps.sh \
+curl -fsSL https://raw.githubusercontent.com/linbmv/mindfs/custom/mindfs-local/scripts/deploy-vps.sh \
   | sudo bash -s -- \
     --data-dir /srv/mindfs/data \
     --project-dir /srv/mindfs/workspace \
