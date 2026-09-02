@@ -461,6 +461,17 @@ build_from_source() {
     git -C "$source_dir" pull --ff-only
   fi
 
+  # A fresh checkout has no node_modules, and `make build-web` invokes vite
+  # directly, so install web dependencies first. Prefer `npm ci` for its
+  # lockfile guarantees, falling back when the lockfile is absent.
+  if [[ -f "$source_dir/web/package-lock.json" ]]; then
+    log "Installing web dependencies with npm ci"
+    (cd "$source_dir/web" && npm ci)
+  else
+    log "Installing web dependencies with npm install (no lockfile found)"
+    (cd "$source_dir/web" && npm install)
+  fi
+
   log "Building web assets and binary, then installing into ${PREFIX} (takes a few minutes)"
   make -C "$source_dir" install PREFIX="$PREFIX"
 }
