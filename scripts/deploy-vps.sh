@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Install MindFS as an independent service on a Debian/Ubuntu VPS.
-# The script does not use the current checkout directory. It downloads a
-# released binary and keeps the executable, service data, and project root in
+# The script does not use the current checkout directory. It builds from a
+# source checkout and keeps the executable, service data, and project root in
 # separate configurable absolute paths. systemd is preferred; environments
 # without a running systemd (for example containers) use a managed background
 # process instead.
@@ -44,6 +44,10 @@ SERVICE_GROUP=""
 SERVICE_MODE=""
 LISTEN_ADDR=""
 HEALTH_URL=""
+RUNUSER_PATH=""
+ENV_PATH=""
+SYSTEMCTL_PATH=""
+JOURNALCTL_PATH=""
 
 SCRIPT_DIR=""
 if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
@@ -53,6 +57,8 @@ fi
 SOURCE_DIR_EXPLICIT=0
 [[ -n "${MINDFS_SOURCE_DIR:-}" ]] && SOURCE_DIR_EXPLICIT=1
 IN_TREE_BUILD=0
+MIN_GO_MAJOR=1
+MIN_GO_MINOR=25
 
 log() {
   printf '[mindfs-vps] %s\n' "$*"
@@ -72,7 +78,7 @@ usage() {
 MindFS VPS deployment
 
 Builds MindFS from source on this host and creates a service.
-No prebuilt binary is ever downloaded. Requires go, npm, git and make.
+No prebuilt binary is ever downloaded. Requires Go 1.25+, Node.js 20+, git and make.
 The service is independent of the directory from which this script is run.
 
 Options:
@@ -377,11 +383,26 @@ ensure_root() {
   [[ "${EUID}" -eq 0 ]] || die "run as root, for example: curl ... | sudo bash -s --"
 }
 
+bootstrap_tool_path() {
+  # sudo may reset PATH and hide a system-wide Go installation under
+  # /usr/local/go/bin. Add standard installation locations before checking
+  # dependencies so piped and interactive invocations behave identically.
+  local go_bin
+  for go_bin in /usr/local/go/bin /usr/local/bin /usr/bin /bin; do
+    if [[ -x "$go_bin/go" ]]; then
+      PATH="$go_bin:$PATH"
+      break
+    fi
+  done
+  export PATH
+}
+
 ensure_dependencies() {
   local missing=()
   local command_name
   local packages=(curl ca-certificates tar util-linux git make)
-  local required=(curl tar install useradd id stat runuser git make)
+  local required=(curl tar install useradd id stat git make)
+  [[ "$SERVICE_MODE" == "background" ]] && required+=(runuser)
   for command_name in "${required[@]}"; do
     command -v "$command_name" >/dev/null 2>&1 || missing+=("$command_name")
   done
@@ -391,10 +412,52 @@ ensure_dependencies() {
     DEBIAN_FRONTEND=noninteractive apt-get update
     DEBIAN_FRONTEND=noninteractive apt-get install -y "${packages[@]}"
   fi
-  for command_name in go npm; do
+
+  missing=()
+  for command_name in "${required[@]}"; do
+    command -v "$command_name" >/dev/null 2>&1 || missing+=("$command_name")
+  done
+  ((${#missing[@]} == 0)) ||
+    die "required command(s) still missing after package installation: ${missing[*]}"
+
+  for command_name in go node npm; do
     command -v "$command_name" >/dev/null 2>&1 ||
       die "building from source needs ${command_name}; install a current version (distro packages are often too old) before rerunning"
   done
+
+  local go_version go_major go_minor
+  go_version="$(go version | awk '{print $3}' | sed 's/^go//')"
+  go_major="${go_version%%.*}"
+  go_minor="${go_version#*.}"
+  go_minor="${go_minor%%.*}"
+  [[ "$go_major" =~ ^[0-9]+$ && "$go_minor" =~ ^[0-9]+$ ]] ||
+    die "unable to determine Go version from: $(go version)"
+  if ((go_major < MIN_GO_MAJOR || (go_major == MIN_GO_MAJOR && go_minor < MIN_GO_MINOR))); then
+    die "MindFS requires Go >= ${MIN_GO_MAJOR}.${MIN_GO_MINOR}; found ${go_version}"
+  fi
+
+  local node_version node_major
+  node_version="$(node --version | sed 's/^v//')"
+  node_major="${node_version%%.*}"
+  [[ "$node_major" =~ ^[0-9]+$ ]] ||
+    die "unable to determine Node.js version from: $(node --version)"
+  ((node_major >= 20)) || die "MindFS requires Node.js >= 20; found ${node_version}"
+}
+
+resolve_runtime_tools() {
+  ENV_PATH="$(command -v env || true)"
+  [[ -n "$ENV_PATH" ]] || die "env is required to launch MindFS"
+
+  if [[ "$SERVICE_MODE" == "background" ]]; then
+    RUNUSER_PATH="$(command -v runuser || true)"
+    [[ -x "$RUNUSER_PATH" ]] ||
+      die "background mode requires runuser; install util-linux and rerun deployment"
+  else
+    SYSTEMCTL_PATH="$(command -v systemctl || true)"
+    JOURNALCTL_PATH="$(command -v journalctl || true)"
+    [[ -x "$SYSTEMCTL_PATH" && -x "$JOURNALCTL_PATH" ]] ||
+      die "systemd mode requires systemctl and journalctl"
+  fi
 }
 
 ensure_service_user() {
@@ -412,8 +475,29 @@ ensure_service_user() {
   ensure_owned_dir "$DATA_DIR" 0750 "$service_uid" "$service_gid"
   ensure_owned_dir "$HOME_DIR" 0750 "$service_uid" "$service_gid"
   ensure_owned_dir "$CONFIG_HOME" 0700 "$service_uid" "$service_gid"
+
+  # mkdir -p on STATE_HOME would otherwise leave its intermediate .local
+  # directory root-owned under umask 077, preventing the service user from
+  # traversing /var/lib/mindfs/.local. This directory is internal service
+  # state, so repair its ownership explicitly on reruns as well.
+  local state_parent="${HOME_DIR}/.local"
+  if [[ -e "$state_parent" && ! -d "$state_parent" ]]; then
+    die "path exists but is not a directory: $state_parent"
+  fi
+  mkdir -p "$state_parent" "$STATE_HOME"
+  chown "$service_uid:$service_gid" "$state_parent" "$STATE_HOME"
+  chmod 0750 "$state_parent" "$STATE_HOME"
   ensure_owned_dir "$STATE_HOME" 0750 "$service_uid" "$service_gid"
   ensure_owned_dir "$PROJECT_DIR" 0750 "$service_uid" "$service_gid"
+}
+
+verify_service_user_paths() {
+  [[ "$SERVICE_MODE" == "background" ]] || return 0
+  "$RUNUSER_PATH" -u "$SERVICE_USER" -- "$ENV_PATH" \
+    HOME="$HOME_DIR" \
+    XDG_CONFIG_HOME="$CONFIG_HOME" \
+    /bin/sh -c 'umask 077; mkdir -p "$HOME/.local/share"; test -w "$HOME" && test -w "$HOME/.local/share" && test -w "$XDG_CONFIG_HOME"' ||
+    die "service user ${SERVICE_USER} cannot write HOME/config state; check ownership of ${HOME_DIR} and ${CONFIG_HOME}"
 }
 
 ensure_owned_dir() {
@@ -482,7 +566,8 @@ install_mindfs() {
 }
 
 write_start_script() {
-  mkdir -p "${PREFIX}/bin"
+  mkdir -p -m 0755 "${PREFIX}/bin"
+  chmod 0755 "$PREFIX" "${PREFIX}/bin"
   {
     printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail'
     printf 'exec %s --foreground --addr %s' \
@@ -496,20 +581,28 @@ write_start_script() {
   chmod 0755 "$START_SCRIPT"
 }
 
-write_background_control_script() {
+write_control_script() {
   mkdir -p "${PREFIX}/bin"
   {
     printf '%s\n' '#!/usr/bin/env bash' 'set -Eeuo pipefail'
+    printf 'SERVICE_MODE=%s\n' "$(shell_quote "$SERVICE_MODE")"
+    printf 'SERVICE_NAME=%s\n' "$(shell_quote "$SERVICE_NAME")"
     printf 'SERVICE_USER=%s\n' "$(shell_quote "$SERVICE_USER")"
     printf 'SERVICE_GROUP=%s\n' "$(shell_quote "$SERVICE_GROUP")"
     printf 'DATA_DIR=%s\n' "$(shell_quote "$DATA_DIR")"
+    printf 'CONFIG_DIR=%s\n' "$(shell_quote "$CONFIG_DIR")"
     printf 'CONFIG_HOME=%s\n' "$(shell_quote "$CONFIG_HOME")"
     printf 'HOME_DIR=%s\n' "$(shell_quote "$HOME_DIR")"
     printf 'START_SCRIPT=%s\n' "$(shell_quote "$START_SCRIPT")"
     printf 'BIN_PATH=%s\n' "$(shell_quote "${PREFIX}/bin/mindfs")"
     printf 'PID_FILE=%s\n' "$(shell_quote "$PID_FILE")"
     printf 'LOG_FILE=%s\n' "$(shell_quote "$LOG_FILE")"
+    printf 'PAIRING_FILE=%s\n' "$(shell_quote "${CONFIG_DIR}/e2ee.json")"
     printf 'PATH_VALUE=%s\n' "$(shell_quote "${PREFIX}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")"
+    printf 'RUNUSER_PATH=%s\n' "$(shell_quote "$RUNUSER_PATH")"
+    printf 'ENV_PATH=%s\n' "$(shell_quote "$ENV_PATH")"
+    printf 'SYSTEMCTL_PATH=%s\n' "$(shell_quote "$SYSTEMCTL_PATH")"
+    printf 'JOURNALCTL_PATH=%s\n' "$(shell_quote "$JOURNALCTL_PATH")"
     cat <<'EOF'
 
 require_root() {
@@ -535,14 +628,30 @@ process_matches() {
 }
 
 is_running() {
+  if [[ "$SERVICE_MODE" == "systemd" ]]; then
+    "$SYSTEMCTL_PATH" is-active --quiet "${SERVICE_NAME}.service"
+    return
+  fi
   local pid
   pid="$(read_pid 2>/dev/null || true)"
   [[ -n "$pid" ]] || return 1
   kill -0 "$pid" 2>/dev/null && process_matches "$pid"
 }
 
+check_service_user_paths() {
+  [[ "$SERVICE_MODE" == "background" ]] || return 0
+  "$RUNUSER_PATH" -u "$SERVICE_USER" -- "$ENV_PATH" \
+    HOME="$HOME_DIR" \
+    XDG_CONFIG_HOME="$CONFIG_HOME" \
+    /bin/sh -c 'umask 077; mkdir -p "$HOME/.local/share"; test -w "$HOME" && test -w "$HOME/.local/share" && test -w "$XDG_CONFIG_HOME"'
+}
+
 start_service() {
   require_root
+  if [[ "$SERVICE_MODE" == "systemd" ]]; then
+    "$SYSTEMCTL_PATH" start "${SERVICE_NAME}.service"
+    return
+  fi
   if is_running; then
     printf 'mindfs is already running (pid %s)\n' "$(read_pid)"
     return 0
@@ -551,7 +660,11 @@ start_service() {
   touch "$LOG_FILE"
   chown "$SERVICE_USER:$SERVICE_GROUP" "$LOG_FILE"
   chmod 0640 "$LOG_FILE"
-  nohup runuser -u "$SERVICE_USER" -- env \
+  if ! check_service_user_paths; then
+    printf 'mindfs cannot start: %s cannot write %s or %s\n' "$SERVICE_USER" "$HOME_DIR" "$CONFIG_HOME" >&2
+    exit 1
+  fi
+  nohup "$RUNUSER_PATH" -u "$SERVICE_USER" -- "$ENV_PATH" \
     HOME="$HOME_DIR" \
     XDG_CONFIG_HOME="$CONFIG_HOME" \
     PATH="$PATH_VALUE" \
@@ -570,6 +683,10 @@ start_service() {
 
 stop_service() {
   require_root
+  if [[ "$SERVICE_MODE" == "systemd" ]]; then
+    "$SYSTEMCTL_PATH" stop "${SERVICE_NAME}.service"
+    return
+  fi
   local pid
   pid="$(read_pid 2>/dev/null || true)"
   if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null || ! process_matches "$pid"; then
@@ -593,11 +710,30 @@ stop_service() {
 }
 
 status_service() {
+  if [[ "$SERVICE_MODE" == "systemd" ]]; then
+    "$SYSTEMCTL_PATH" --no-pager --full status "${SERVICE_NAME}.service" || true
+    return 0
+  fi
   if is_running; then
     printf 'mindfs is active (pid %s)\n' "$(read_pid)"
   else
     printf 'mindfs is inactive\n'
   fi
+}
+
+pairing_service() {
+  local secret
+  if [[ ! -r "$PAIRING_FILE" ]]; then
+    printf 'pairing code is unavailable; file not found: %s\n' "$PAIRING_FILE" >&2
+    return 1
+  fi
+  secret="$(awk -F'"' '/"pairing_secret"[[:space:]]*:/ { print $4; exit }' "$PAIRING_FILE" 2>/dev/null || true)"
+  if [[ -n "$secret" ]]; then
+    printf '%s\n' "$secret"
+    return 0
+  fi
+  printf 'pairing code is unavailable; E2EE may be disabled or the config is incomplete: %s\n' "$PAIRING_FILE" >&2
+  return 1
 }
 
 logs_service() {
@@ -608,10 +744,30 @@ case "${1:-status}" in
   start) start_service ;;
   stop) stop_service ;;
   restart) stop_service; start_service ;;
-  status) status_service ;;
-  logs) logs_service ;;
+  status)
+    status_service
+    if [[ "${2:-}" == "--pairing" ]]; then
+      pairing_service
+    elif [[ -n "${2:-}" ]]; then
+      printf 'usage: %s {start|stop|restart|status [--pairing]|pairing|logs}\n' "$0" >&2
+      exit 2
+    fi
+    ;;
+  pairing|code)
+    [[ -z "${2:-}" ]] || {
+      printf 'usage: %s {start|stop|restart|status [--pairing]|pairing|logs}\n' "$0" >&2
+      exit 2
+    }
+    pairing_service
+    ;;
+  logs)
+    if [[ "$SERVICE_MODE" == "systemd" ]]; then
+      exec "$JOURNALCTL_PATH" -u "${SERVICE_NAME}.service" -f
+    fi
+    logs_service
+    ;;
   *)
-    printf 'usage: %s {start|stop|restart|status|logs}\n' "$0" >&2
+    printf 'usage: %s {start|stop|restart|status [--pairing]|pairing|logs}\n' "$0" >&2
     exit 2
     ;;
 esac
@@ -699,14 +855,14 @@ print_summary() {
   fi
 
   printf '\nMindFS VPS deployment complete.\n\n'
-  if [[ "$SERVICE_MODE" == "systemd" ]]; then
-    printf '  Service:     systemctl status %s\n' "$SERVICE_NAME"
-    printf '  Logs:        journalctl -u %s -f\n' "$SERVICE_NAME"
-  else
-    printf '  Service:     sudo %s status\n' "$CONTROL_SCRIPT"
-    printf '  Start/stop:  sudo %s {start|stop|restart}\n' "$CONTROL_SCRIPT"
-    printf '  Logs:        sudo %s logs\n' "$CONTROL_SCRIPT"
+  printf '  Service:     sudo %s status\n' "$CONTROL_SCRIPT"
+  printf '  Start/stop:  sudo %s {start|stop|restart}\n' "$CONTROL_SCRIPT"
+  printf '  Pairing:     sudo %s pairing\n' "$CONTROL_SCRIPT"
+  printf '  Logs:        sudo %s logs\n' "$CONTROL_SCRIPT"
+  if [[ "$SERVICE_MODE" == "background" ]]; then
     printf '  Note:        systemd is unavailable; this process will not auto-start after a host reboot\n'
+  else
+    printf '  Systemd:     sudo systemctl status %s\n' "$SERVICE_NAME"
   fi
   printf '  Data:        %s\n' "$DATA_DIR"
   printf '  HOME:        %s\n' "$HOME_DIR"
@@ -752,15 +908,17 @@ main() {
   fi
 
   ensure_root
+  bootstrap_tool_path
   ensure_dependencies
+  resolve_runtime_tools
   ensure_service_user
+  verify_service_user_paths
   install_mindfs
   write_start_script
   if [[ "$SERVICE_MODE" == "systemd" ]]; then
     write_systemd_unit
-  else
-    write_background_control_script
   fi
+  write_control_script
   if [[ "$SKIP_START" == 0 ]]; then
     start_service
   else
