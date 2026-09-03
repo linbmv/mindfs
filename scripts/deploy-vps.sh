@@ -47,7 +47,6 @@ HEALTH_URL=""
 RUNUSER_PATH=""
 ENV_PATH=""
 SYSTEMCTL_PATH=""
-JOURNALCTL_PATH=""
 
 SCRIPT_DIR=""
 if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
@@ -454,9 +453,8 @@ resolve_runtime_tools() {
       die "background mode requires runuser; install util-linux and rerun deployment"
   else
     SYSTEMCTL_PATH="$(command -v systemctl || true)"
-    JOURNALCTL_PATH="$(command -v journalctl || true)"
-    [[ -x "$SYSTEMCTL_PATH" && -x "$JOURNALCTL_PATH" ]] ||
-      die "systemd mode requires systemctl and journalctl"
+    [[ -x "$SYSTEMCTL_PATH" ]] ||
+      die "systemd mode requires systemctl"
   fi
 }
 
@@ -602,7 +600,6 @@ write_control_script() {
     printf 'RUNUSER_PATH=%s\n' "$(shell_quote "$RUNUSER_PATH")"
     printf 'ENV_PATH=%s\n' "$(shell_quote "$ENV_PATH")"
     printf 'SYSTEMCTL_PATH=%s\n' "$(shell_quote "$SYSTEMCTL_PATH")"
-    printf 'JOURNALCTL_PATH=%s\n' "$(shell_quote "$JOURNALCTL_PATH")"
     cat <<'EOF'
 
 require_root() {
@@ -712,62 +709,37 @@ stop_service() {
 status_service() {
   if [[ "$SERVICE_MODE" == "systemd" ]]; then
     "$SYSTEMCTL_PATH" --no-pager --full status "${SERVICE_NAME}.service" || true
-    return 0
-  fi
-  if is_running; then
-    printf 'mindfs is active (pid %s)\n' "$(read_pid)"
   else
-    printf 'mindfs is inactive\n'
+    if is_running; then
+      printf 'mindfs is active (pid %s)\n' "$(read_pid)"
+    else
+      printf 'mindfs is inactive\n'
+    fi
   fi
+  pairing_service
 }
 
 pairing_service() {
   local secret
   if [[ ! -r "$PAIRING_FILE" ]]; then
-    printf 'pairing code is unavailable; file not found: %s\n' "$PAIRING_FILE" >&2
-    return 1
+    printf 'pairing code: unavailable (file not found: %s)\n' "$PAIRING_FILE"
+    return 0
   fi
   secret="$(awk -F'"' '/"pairing_secret"[[:space:]]*:/ { print $4; exit }' "$PAIRING_FILE" 2>/dev/null || true)"
   if [[ -n "$secret" ]]; then
-    printf '%s\n' "$secret"
+    printf 'pairing code: %s\n' "$secret"
     return 0
   fi
-  printf 'pairing code is unavailable; E2EE may be disabled or the config is incomplete: %s\n' "$PAIRING_FILE" >&2
-  return 1
-}
-
-logs_service() {
-  exec tail -n 100 -f "$LOG_FILE"
+  printf 'pairing code: unavailable (E2EE may be disabled or config is incomplete: %s)\n' "$PAIRING_FILE"
 }
 
 case "${1:-status}" in
   start) start_service ;;
   stop) stop_service ;;
   restart) stop_service; start_service ;;
-  status)
-    status_service
-    if [[ "${2:-}" == "--pairing" ]]; then
-      pairing_service
-    elif [[ -n "${2:-}" ]]; then
-      printf 'usage: %s {start|stop|restart|status [--pairing]|pairing|logs}\n' "$0" >&2
-      exit 2
-    fi
-    ;;
-  pairing|code)
-    [[ -z "${2:-}" ]] || {
-      printf 'usage: %s {start|stop|restart|status [--pairing]|pairing|logs}\n' "$0" >&2
-      exit 2
-    }
-    pairing_service
-    ;;
-  logs)
-    if [[ "$SERVICE_MODE" == "systemd" ]]; then
-      exec "$JOURNALCTL_PATH" -u "${SERVICE_NAME}.service" -f
-    fi
-    logs_service
-    ;;
+  status) status_service ;;
   *)
-    printf 'usage: %s {start|stop|restart|status [--pairing]|pairing|logs}\n' "$0" >&2
+    printf 'usage: %s {start|stop|restart|status}\n' "$0" >&2
     exit 2
     ;;
 esac
@@ -825,7 +797,7 @@ wait_for_health() {
     die "MindFS did not become healthy; inspect: journalctl -u ${SERVICE_NAME} -e"
   fi
   tail -n 80 "$LOG_FILE" || true
-  die "MindFS did not become healthy; inspect: ${CONTROL_SCRIPT} logs"
+  die "MindFS did not become healthy; inspect: ${LOG_FILE}"
 }
 
 configure_firewall() {
@@ -857,8 +829,7 @@ print_summary() {
   printf '\nMindFS VPS deployment complete.\n\n'
   printf '  Service:     sudo %s status\n' "$CONTROL_SCRIPT"
   printf '  Start/stop:  sudo %s {start|stop|restart}\n' "$CONTROL_SCRIPT"
-  printf '  Pairing:     sudo %s pairing\n' "$CONTROL_SCRIPT"
-  printf '  Logs:        sudo %s logs\n' "$CONTROL_SCRIPT"
+  printf '  Pairing:     included in sudo %s status\n' "$CONTROL_SCRIPT"
   if [[ "$SERVICE_MODE" == "background" ]]; then
     printf '  Note:        systemd is unavailable; this process will not auto-start after a host reboot\n'
   else
