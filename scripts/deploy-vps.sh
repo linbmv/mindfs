@@ -36,6 +36,7 @@ SKIP_START=0
 CONFIG_HOME=""
 STATE_HOME=""
 START_SCRIPT="${PREFIX}/bin/mindfs-vps-start"
+STATIC_DIR="${PREFIX}/share/mindfs/web"
 UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
 PID_FILE="${DATA_DIR}/mindfs.pid"
 LOG_FILE="${DATA_DIR}/mindfs.log"
@@ -250,6 +251,7 @@ validate_config() {
   CONFIG_HOME="$(dirname "$CONFIG_DIR")"
   STATE_HOME="${HOME_DIR}/.local/share"
   START_SCRIPT="${PREFIX}/bin/mindfs-vps-start"
+  STATIC_DIR="${PREFIX}/share/mindfs/web"
   UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
   PID_FILE="${DATA_DIR}/mindfs.pid"
   LOG_FILE="${DATA_DIR}/mindfs.log"
@@ -561,6 +563,19 @@ build_from_source() {
 install_mindfs() {
   build_from_source "$SOURCE_DIR"
   [[ -x "${PREFIX}/bin/mindfs" ]] || die "MindFS binary was not installed at ${PREFIX}/bin/mindfs"
+
+  [[ -f "${STATIC_DIR}/index.html" ]] ||
+    die "frontend assets were not installed at ${STATIC_DIR}/index.html"
+  [[ -f "${STATIC_DIR}/favicon.svg" ]] ||
+    die "frontend assets were not installed at ${STATIC_DIR}/favicon.svg"
+
+  # The installer runs with umask 077.  Static assets are public application
+  # files, so make the complete installed tree traversable/readable by the
+  # unprivileged service user before the first start.
+  chmod 0755 "$PREFIX" "${PREFIX}/bin" "${PREFIX}/share" \
+    "${PREFIX}/share/mindfs" "$STATIC_DIR"
+  find "$STATIC_DIR" -type d -exec chmod 0755 {} +
+  find "$STATIC_DIR" -type f -exec chmod 0644 {} +
 }
 
 write_start_script() {
@@ -568,6 +583,7 @@ write_start_script() {
   chmod 0755 "$PREFIX" "${PREFIX}/bin"
   {
     printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail'
+    printf 'export MINDFS_STATIC_DIR=%s\n' "$(shell_quote "$STATIC_DIR")"
     printf 'exec %s --foreground --addr %s' \
       "$(shell_quote "${PREFIX}/bin/mindfs")" \
       "$(shell_quote "$LISTEN_ADDR")"
