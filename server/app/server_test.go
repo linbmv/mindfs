@@ -28,6 +28,20 @@ func TestResolveStaticDirFromExecutablePrefersBuiltWebDist(t *testing.T) {
 	}
 }
 
+func TestEnsureUserLocalBinOnPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("PATH", "/usr/local/bin:/usr/bin")
+
+	ensureUserLocalBinOnPath()
+
+	want := filepath.Join(home, ".local", "bin")
+	entries := strings.Split(os.Getenv("PATH"), string(os.PathListSeparator))
+	if len(entries) == 0 || entries[0] != want {
+		t.Fatalf("PATH = %q, want user-local bin first", os.Getenv("PATH"))
+	}
+}
+
 func TestResolveStaticDirFromExecutableFallsBackToReleaseArchiveLayout(t *testing.T) {
 	root := t.TempDir()
 	exeDir := filepath.Join(root, "bin")

@@ -33,6 +33,33 @@ const staticDirEnvKey = "MINDFS_STATIC_DIR"
 const externalProjectDiscoveryInterval = time.Minute
 const hostedAgentsRefreshInterval = 10 * time.Minute
 
+// ensureUserLocalBinOnPath keeps CLI installers that target ~/.local/bin
+// visible to both agent discovery and the later agent process launch. Service
+// managers commonly provide a minimal PATH and do not source shell startup
+// files, while the web terminal installs Codex/Claude for the service user.
+func ensureUserLocalBinOnPath() {
+	home := strings.TrimSpace(os.Getenv("HOME"))
+	if home == "" {
+		home, _ = os.UserHomeDir()
+	}
+	if home == "" {
+		return
+	}
+
+	localBin := filepath.Join(home, ".local", "bin")
+	pathValue := os.Getenv("PATH")
+	for _, entry := range strings.Split(pathValue, string(os.PathListSeparator)) {
+		if entry == localBin {
+			return
+		}
+	}
+	if pathValue == "" {
+		_ = os.Setenv("PATH", localBin)
+		return
+	}
+	_ = os.Setenv("PATH", localBin+string(os.PathListSeparator)+pathValue)
+}
+
 type StartOptions struct {
 	NoRelayer       bool
 	RelayBaseURL    string
@@ -75,6 +102,7 @@ func EnsureE2EEConfig(enabled bool) (E2EEEnsureResult, error) {
 
 // Start boots the HTTP/WS server.
 func Start(ctx context.Context, addr string, opts StartOptions) error {
+	ensureUserLocalBinOnPath()
 	registry, err := fs.NewDefaultRegistry()
 	if err != nil {
 		return err
