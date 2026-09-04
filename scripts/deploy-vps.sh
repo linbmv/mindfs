@@ -49,6 +49,7 @@ HEALTH_URL=""
 RUNUSER_PATH=""
 ENV_PATH=""
 SYSTEMCTL_PATH=""
+SS_PATH=""
 
 SCRIPT_DIR=""
 if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
@@ -403,8 +404,8 @@ bootstrap_tool_path() {
 ensure_dependencies() {
   local missing=()
   local command_name
-  local packages=(curl ca-certificates tar util-linux git make)
-  local required=(curl tar install useradd id stat git make)
+  local packages=(curl ca-certificates tar util-linux iproute2 git make)
+  local required=(curl tar install useradd id stat ss git make)
   [[ "$SERVICE_MODE" == "background" ]] && required+=(runuser)
   for command_name in "${required[@]}"; do
     command -v "$command_name" >/dev/null 2>&1 || missing+=("$command_name")
@@ -450,6 +451,8 @@ ensure_dependencies() {
 resolve_runtime_tools() {
   ENV_PATH="$(command -v env || true)"
   [[ -n "$ENV_PATH" ]] || die "env is required to launch MindFS"
+  SS_PATH="$(command -v ss || true)"
+  [[ -x "$SS_PATH" ]] || die "ss is required to manage an existing MindFS listener"
 
   if [[ "$SERVICE_MODE" == "background" ]]; then
     RUNUSER_PATH="$(command -v runuser || true)"
@@ -618,6 +621,8 @@ write_control_script() {
     printf 'RUNUSER_PATH=%s\n' "$(shell_quote "$RUNUSER_PATH")"
     printf 'ENV_PATH=%s\n' "$(shell_quote "$ENV_PATH")"
     printf 'SYSTEMCTL_PATH=%s\n' "$(shell_quote "$SYSTEMCTL_PATH")"
+    printf 'SS_PATH=%s\n' "$(shell_quote "$SS_PATH")"
+    printf 'PORT=%s\n' "$(shell_quote "$PORT")"
     cat <<'EOF'
 
 require_root() {
@@ -640,6 +645,27 @@ process_matches() {
   local command_line
   command_line="$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null || true)"
   [[ "$command_line" == *"$START_SCRIPT"* || "$command_line" == *"$BIN_PATH"* ]]
+}
+
+listener_pids() {
+  local line pid
+  while IFS= read -r line; do
+    pid="$(sed -nE 's/.*pid=([0-9]+).*/\1/p' <<<"$line")"
+    [[ "$pid" =~ ^[0-9]+$ ]] || continue
+    if process_matches "$pid"; then
+      printf '%s\n' "$pid"
+    fi
+  done < <("$SS_PATH" -H -lntp "sport = :$PORT" 2>/dev/null || true)
+}
+
+running_pid() {
+  local pid
+  pid="$(read_pid 2>/dev/null || true)"
+  if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null && process_matches "$pid"; then
+    printf '%s\n' "$pid"
+    return 0
+  fi
+  listener_pids | head -n 1
 }
 
 is_running() {
@@ -668,8 +694,19 @@ start_service() {
     return
   fi
   if is_running; then
-    printf 'mindfs is already running (pid %s)\n' "$(read_pid)"
+    printf 'mindfs is already running (pid %s)\n' "$(running_pid)"
     return 0
+  fi
+  local listener_pid
+  listener_pid="$(listener_pids | head -n 1 || true)"
+  if [[ -n "$listener_pid" ]]; then
+    printf 'stopping unmanaged MindFS listener on port %s (pid %s)\n' "$PORT" "$listener_pid"
+    kill "$listener_pid" 2>/dev/null || true
+    for _ in $(seq 1 30); do
+      kill -0 "$listener_pid" 2>/dev/null || break
+      sleep 1
+    done
+    kill -KILL "$listener_pid" 2>/dev/null || true
   fi
   rm -f "$PID_FILE"
   touch "$LOG_FILE"
@@ -703,8 +740,8 @@ stop_service() {
     return
   fi
   local pid
-  pid="$(read_pid 2>/dev/null || true)"
-  if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null || ! process_matches "$pid"; then
+  pid="$(running_pid || true)"
+  if [[ -z "$pid" ]]; then
     rm -f "$PID_FILE"
     printf 'mindfs is not running\n'
     return 0
